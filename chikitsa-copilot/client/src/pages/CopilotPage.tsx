@@ -13,6 +13,7 @@ import DOMPurify from 'dompurify';
 import { Bot, Send } from 'lucide-react';
 import { marked } from 'marked';
 import { useSearchParams } from 'react-router';
+import { DistrictStateMap } from '../components/DistrictStateMap';
 import { SearchableSelect } from '../components/SearchableSelect';
 import { fetchJson } from '../lib/api';
 import type { CopilotResponse, LocationOptions } from '../lib/chikitsa-types';
@@ -107,65 +108,69 @@ export function CopilotPage() {
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.7fr_1.3fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle>Question</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form
-              onSubmit={(event) => {
-                void analyze(event);
-              }}
-              className="space-y-4"
-            >
-              <Textarea
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                className="min-h-32"
-                placeholder="Ask about district health burden, facility evidence, or data quality"
-                required
-                minLength={8}
-              />
-              <SearchableSelect
-                id="copilot-state"
-                label="State focus"
-                value={state}
-                options={stateOptions}
-                onChange={(nextState) => {
-                  setState(nextState);
-                  setDistrict('');
+        <div className="space-y-5">
+          <Card>
+            <CardHeader>
+              <CardTitle>Question</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form
+                onSubmit={(event) => {
+                  void analyze(event);
                 }}
-                placeholder="Type a state"
-              />
-              <SearchableSelect
-                id="copilot-district"
-                label="District focus"
-                value={district}
-                options={districtOptions}
-                onChange={setDistrict}
-                placeholder="Optional district focus"
-                disabled={!locations}
-              />
-              <div className="space-y-2">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Use one prompt</p>
-                {exampleQuestions.map((example) => (
-                  <button
-                    key={example}
-                    type="button"
-                    className="block w-full rounded-lg border px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    onClick={() => setQuestion(example)}
-                  >
-                    {example}
-                  </button>
-                ))}
-              </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={loading || question.trim().length < 8}>
-                <Send className="mr-2 h-4 w-4" /> {loading ? 'Analyzing evidence…' : 'Analyze evidence'}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+                className="space-y-4"
+              >
+                <Textarea
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  className="min-h-32"
+                  placeholder="Ask about district health burden, facility evidence, or data quality"
+                  required
+                  minLength={8}
+                />
+                <SearchableSelect
+                  id="copilot-state"
+                  label="State focus"
+                  value={state}
+                  options={stateOptions}
+                  onChange={(nextState) => {
+                    setState(nextState);
+                    setDistrict('');
+                  }}
+                  placeholder="Type a state"
+                />
+                <SearchableSelect
+                  id="copilot-district"
+                  label="District focus"
+                  value={district}
+                  options={districtOptions}
+                  onChange={setDistrict}
+                  placeholder="Optional district focus"
+                  disabled={!locations}
+                />
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Use one prompt</p>
+                  {exampleQuestions.map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      className="block w-full rounded-lg border px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      onClick={() => setQuestion(example)}
+                    >
+                      {example}
+                    </button>
+                  ))}
+                </div>
+                {error && <p className="text-sm text-destructive">{error}</p>}
+                <Button type="submit" className="w-full" disabled={loading || question.trim().length < 8}>
+                  <Send className="mr-2 h-4 w-4" /> {loading ? 'Analyzing evidence…' : 'Analyze evidence'}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+
+          <DistrictStateMap stateKey={state} districtKey={district} />
+        </div>
 
         <Card className="min-h-[520px]">
           <CardHeader>
