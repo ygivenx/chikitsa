@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -10,7 +10,9 @@ import {
   Skeleton,
   Textarea,
 } from '@databricks/appkit-ui/react';
+import DOMPurify from 'dompurify';
 import { Bot, Send } from 'lucide-react';
+import { marked } from 'marked';
 import { fetchJson } from '../lib/api';
 import type { CopilotResponse } from '../lib/chikitsa-types';
 
@@ -26,6 +28,15 @@ export function CopilotPage() {
   const [result, setResult] = useState<CopilotResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const renderedAnswer = useMemo(() => {
+    if (!result) return '';
+    const html = marked.parse(result.answer, {
+      async: false,
+      breaks: false,
+      gfm: true,
+    });
+    return DOMPurify.sanitize(html);
+  }, [result]);
 
   async function analyze(event: React.FormEvent) {
     event.preventDefault();
@@ -133,9 +144,10 @@ export function CopilotPage() {
             )}
             {!loading && result && (
               <div className="space-y-4">
-                <div className="prose-output whitespace-pre-wrap text-sm leading-7 text-foreground">
-                  {result.answer}
-                </div>
+                <div
+                  className="prose-output text-sm leading-7 text-foreground"
+                  dangerouslySetInnerHTML={{ __html: renderedAnswer }}
+                />
                 <div className="rounded-xl border bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
                   <p>
                     <strong className="text-foreground">Grounding:</strong> {result.evidence.districts.length} district
