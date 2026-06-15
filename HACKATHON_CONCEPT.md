@@ -35,6 +35,13 @@ The current MVP uses:
 NFHS-5 is 2019-2021 data. Facility records are discovered records, not a complete
 provider inventory.
 
+For reliable location assignment, facility latitude and longitude should be
+joined to district or state boundary polygons from geoBoundaries or DataMeet
+India Maps using point-in-polygon logic. PIN-to-district lookup is acceptable as
+a first-pass proxy or fallback, but ambiguous PIN mappings must be flagged.
+String-matching district names is not reliable enough to be the primary join
+method.
+
 ## Core Scores
 
 **Healthcare Desert Score** measures apparent shortage.
@@ -75,13 +82,14 @@ highlights Purnia, Katihar, Saharsa, Kishanganj, and Jehanabad.
 
 The demo flow:
 
-1. Open with the Bihar decision brief.
-2. Show the district action shortlist.
-3. Explain how need, scarcity, and evidence confidence affect ranking.
-4. Select a district and explain why its action class was assigned.
-5. Add government context only as supporting correlation or responsibility.
-6. Ask the copilot: "What intervention should the government investigate first?"
-7. Return evidence, uncertainty, and next verification steps.
+1. Open with the simple India healthcare desert map from available data.
+2. Zoom the story into the Bihar decision brief.
+3. Show the district action shortlist.
+4. Explain how need, scarcity, and evidence confidence affect ranking.
+5. Select a district and explain why its action class was assigned.
+6. Add government context only as supporting correlation or responsibility.
+7. Ask the copilot: "What intervention should the government investigate first?"
+8. Return evidence, uncertainty, and next verification steps.
 
 ## Copilot Role
 
@@ -96,6 +104,8 @@ The best copilot question is: "Why did this district receive this action class?"
 To make the system defensible:
 
 - Keep district joins canonical and avoid raw PIN fanout
+- Use point-in-polygon joins for reliable facility geography when coordinates and
+  boundary polygons are available
 - Treat suppressed NFHS values as missing, not zero
 - Downweight or flag caution estimates
 - Show missing-data warnings alongside scores

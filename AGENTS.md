@@ -25,6 +25,7 @@ not provide clinical advice.
 Keep the demo focused:
 
 - Brief: Bihar decision brief and action shortlist
+- Map: first-pass India healthcare desert signal from available district scores
 - Evidence: ranking logic and score explanation
 - Actions: follow-up queue for government investigation
 - Copilot: evidence-grounded explanation of the selected action
@@ -69,6 +70,12 @@ Label NFHS-5 as 2019-2021 data. Do not imply it is current.
 
 Treat marketplace facility counts as discovered records, not a complete provider
 inventory.
+
+For reliable facility-to-district assignment, prefer facility latitude and
+longitude with district or state boundary polygons from geoBoundaries or DataMeet
+India Maps, using point-in-polygon joins. Use PIN-to-district lookup only as a
+fallback or first-pass proxy, and always flag ambiguous PIN mappings. Do not rely
+on string-matching district names as the primary join method.
 
 Frame GDP, roads, urban/rural, expenditure, and constituency data as context or
 correlation. Do not claim political causation or rank political parties.

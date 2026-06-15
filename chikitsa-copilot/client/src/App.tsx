@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import { createBrowserRouter, NavLink, Outlet, RouterProvider } from 'react-router';
 import { Button, Sheet, SheetContent, SheetHeader, SheetTitle } from '@databricks/appkit-ui/react';
-import { Bot, ClipboardList, HeartPulse, LayoutDashboard, Menu, Search } from 'lucide-react';
+import { Bot, ClipboardList, HeartPulse, LayoutDashboard, MapPinned, Menu, Search } from 'lucide-react';
 import { CopilotPage } from './pages/CopilotPage';
 import { ExplorePage } from './pages/ExplorePage';
+import { IndiaMapPage } from './pages/IndiaMapPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { PlansPage } from './pages/PlansPage';
 
 const navigation = [
   { to: '/', label: 'Brief', icon: LayoutDashboard, end: true },
+  { to: '/map', label: 'Map', icon: MapPinned },
   { to: '/explore', label: 'Evidence', icon: Search },
   { to: '/plans', label: 'Actions', icon: ClipboardList },
   { to: '/copilot', label: 'Copilot', icon: Bot },
@@ -111,6 +113,7 @@ const router = createBrowserRouter([
     element: <Layout />,
     children: [
       { path: '/', element: <OverviewPage /> },
+      { path: '/map', element: <IndiaMapPage /> },
       { path: '/explore', element: <ExplorePage /> },
       { path: '/plans', element: <PlansPage /> },
       { path: '/copilot', element: <CopilotPage /> },

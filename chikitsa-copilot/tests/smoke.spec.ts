@@ -52,6 +52,7 @@ test('smoke test - app loads and displays home page', async ({ page }) => {
   await expect(page.getByText('Bihar action shortlist')).toBeVisible();
 
   await expect(page.getByRole('link', { name: 'Brief', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Map', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Evidence', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Actions', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Copilot', exact: true })).toBeVisible();

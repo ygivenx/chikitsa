@@ -256,6 +256,57 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       }
     });
 
+    app.get('/api/map/india', async (_req, res) => {
+      try {
+        const result = await appkit.lakebase.query(`
+          WITH ranked AS (
+            ${DISTRICT_RANKING_SQL}
+          ),
+          top_district AS (
+            SELECT *
+            FROM (
+              SELECT
+                ranked.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY state_key
+                  ORDER BY trust_adjusted_score DESC, desert_score DESC
+                ) AS state_rank
+              FROM ranked
+            ) ordered
+            WHERE state_rank = 1
+          )
+          SELECT
+            r.state_name,
+            r.state_key,
+            COUNT(*)::INT AS district_count,
+            SUM(r.facility_count)::INT AS facility_count,
+            ROUND(AVG(r.desert_score)::NUMERIC, 1)::DOUBLE PRECISION AS avg_desert_score,
+            ROUND(AVG(r.evidence_trust_score)::NUMERIC, 1)::DOUBLE PRECISION AS avg_evidence_confidence,
+            ROUND(MAX(r.trust_adjusted_score)::NUMERIC, 1)::DOUBLE PRECISION AS max_trust_adjusted_score,
+            SUM(CASE WHEN r.recommended_action = 'build' THEN 1 ELSE 0 END)::INT AS build_count,
+            SUM(CASE WHEN r.recommended_action = 'verify' THEN 1 ELSE 0 END)::INT AS verify_count,
+            MAX(t.district_name) AS top_district_name,
+            MAX(t.recommended_action) AS top_district_action,
+            ROUND(MAX(t.trust_adjusted_score)::NUMERIC, 1)::DOUBLE PRECISION AS top_district_score
+          FROM ranked r
+          JOIN top_district t
+            ON r.state_key = t.state_key
+          GROUP BY r.state_name, r.state_key
+          ORDER BY max_trust_adjusted_score DESC, avg_desert_score DESC
+        `);
+
+        res.json({
+          states: result.rows,
+          freshness: 'NFHS-5 2019-2021; facility marketplace snapshot',
+          assignmentMethod:
+            'Current state/UT choropleth aggregates district scores from available facility records mapped through unambiguous PIN geography. Reliable district assignment should use facility coordinates with point-in-polygon joins against district boundary polygons when available.',
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load India map:', error);
+        res.status(500).json({ error: 'Failed to load India healthcare desert map.' });
+      }
+    });
+
     app.get('/api/facilities', async (req, res) => {
       const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
       const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';

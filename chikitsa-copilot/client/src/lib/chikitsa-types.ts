@@ -46,6 +46,27 @@ export interface Overview {
   freshness: string;
 }
 
+export interface IndiaMapState {
+  state_name: string;
+  state_key: string;
+  district_count: number;
+  facility_count: number;
+  avg_desert_score: number;
+  avg_evidence_confidence: number;
+  max_trust_adjusted_score: number;
+  build_count: number;
+  verify_count: number;
+  top_district_name: string;
+  top_district_action: InterventionAction;
+  top_district_score: number;
+}
+
+export interface IndiaMapOverview {
+  states: IndiaMapState[];
+  freshness: string;
+  assignmentMethod: string;
+}
+
 export interface Facility {
   facility_id: string;
   name: string;
