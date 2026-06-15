@@ -1,55 +1,21 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  Skeleton,
-} from '@databricks/appkit-ui/react';
-import { ArrowRight, Database, MapPin, ShieldAlert, Stethoscope, TriangleAlert } from 'lucide-react';
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Skeleton } from '@databricks/appkit-ui/react';
+import { ArrowRight } from 'lucide-react';
 import { fetchJson } from '../lib/api';
+import { actionLabels, actionVariant, biharFocusDistricts } from '../lib/chikitsa-copy';
 import type { Overview } from '../lib/chikitsa-types';
-
-function MetricCard({
-  label,
-  value,
-  detail,
-  icon: Icon,
-}: {
-  label: string;
-  value: number;
-  detail: string;
-  icon: typeof Database;
-}) {
-  return (
-    <Card className="border-border/70 shadow-sm">
-      <CardContent className="p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">{label}</p>
-            <p className="mt-2 text-3xl font-semibold tabular-nums text-foreground">{value.toLocaleString()}</p>
-          </div>
-          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
-            <Icon className="h-5 w-5" />
-          </div>
-        </div>
-        <p className="mt-3 text-xs leading-5 text-muted-foreground">{detail}</p>
-      </CardContent>
-    </Card>
-  );
-}
 
 export function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void fetchJson<Overview>('/api/overview').then(setData).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : 'Failed to load the planning overview.');
-    });
+    void fetchJson<Overview>('/api/overview')
+      .then(setData)
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : 'Failed to load the planning overview.');
+      });
   }, []);
 
   if (error) {
@@ -64,126 +30,161 @@ export function OverviewPage() {
   if (!data) {
     return (
       <div className="space-y-5">
-        <Skeleton className="h-36 w-full rounded-2xl" />
+        <Skeleton className="h-56 w-full rounded-2xl" />
         <div className="grid gap-4 md:grid-cols-3">
-          {Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-36 rounded-xl" />)}
+          {Array.from({ length: 3 }, (_, index) => (
+            <Skeleton key={index} className="h-36 rounded-xl" />
+          ))}
         </div>
         <Skeleton className="h-96 w-full rounded-xl" />
       </div>
     );
   }
 
-  const metrics = [
-    { label: 'Facilities', value: data.metrics.facilities, detail: 'Deduplicated marketplace entities', icon: Stethoscope },
-    { label: 'NFHS districts', value: data.metrics.districts, detail: 'District profiles from NFHS-5', icon: MapPin },
-    { label: 'PIN codes', value: data.metrics.pincodes, detail: 'One row per postal code', icon: Database },
-    { label: 'Ambiguous PINs', value: data.metrics.ambiguous_pincodes, detail: 'Require geographic review', icon: TriangleAlert },
-    { label: 'Facility flags', value: data.metrics.flagged_facilities, detail: 'Coordinate or capacity concerns', icon: ShieldAlert },
+  const districts = data.priorityDistricts.slice(0, 8);
+  const leadDistrict = districts[0];
+  const verifyCount = districts.filter((district) => district.recommended_action === 'verify').length;
+  const actionCounts = districts.reduce<Record<string, number>>((counts, district) => {
+    counts[district.recommended_action] = (counts[district.recommended_action] ?? 0) + 1;
+    return counts;
+  }, {});
+  const demoPath = [
+    {
+      label: 'Rank',
+      detail: 'Start with high need and low discovered facility coverage.',
+    },
+    {
+      label: 'Check trust',
+      detail: 'Lower confidence when records are missing, ambiguous, or implausible.',
+    },
+    {
+      label: 'Choose action',
+      detail: 'Turn each district into Build, Verify, Upgrade, or Improve access.',
+    },
   ];
 
   return (
-    <div className="space-y-7">
-      <section className="hero-panel overflow-hidden rounded-2xl border px-6 py-7 md:px-8">
-        <div className="max-w-3xl">
-          <Badge variant="outline" className="border-primary/30 bg-background/70 text-foreground">
-            Evidence-aware planning
-          </Badge>
-          <h2 className="mt-4 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
-            Find public-health priorities without hiding uncertainty.
-          </h2>
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground md:text-base">
-            Chikitsa combines district health burden, discovered facility capabilities, and explicit data-quality
-            signals. Scores rank attention, not clinical outcomes or complete healthcare coverage.
-          </p>
-          <div className="mt-5 flex flex-wrap gap-3">
-            <Button asChild>
-              <Link to="/copilot">Ask the copilot <ArrowRight className="ml-2 h-4 w-4" /></Link>
-            </Button>
-            <Button variant="outline" asChild>
-              <Link to="/explore">Explore evidence</Link>
-            </Button>
+    <div className="space-y-6">
+      <section className="hero-panel rounded-2xl border p-6 md:p-8">
+        <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
+          <div>
+            <Badge variant="outline" className="border-primary/30 bg-background/70 text-foreground">
+              Bihar decision brief
+            </Badge>
+            <h2 className="mt-4 max-w-4xl text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+              Which districts should government investigate first?
+            </h2>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground md:text-base">
+              The app has one job for the demo: rank Bihar districts, explain whether the signal is a real healthcare
+              gap or a data gap, and produce an action class.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {biharFocusDistricts.map((district) => (
+                <Badge key={district} variant="secondary">
+                  {district}
+                </Badge>
+              ))}
+            </div>
+            <div className="mt-5 flex flex-wrap gap-3">
+              <Button asChild>
+                <Link to="/copilot">
+                  Ask the demo question <ArrowRight className="ml-2 h-4 w-4" />
+                </Link>
+              </Button>
+              <Button variant="outline" asChild>
+                <Link to="/explore">See the ranking logic</Link>
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border bg-card/75 p-5 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Current lead</p>
+            {leadDistrict ? (
+              <>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <h3 className="text-2xl font-semibold text-foreground">{leadDistrict.district_name}</h3>
+                  <Badge variant={actionVariant(leadDistrict.recommended_action)}>
+                    {actionLabels[leadDistrict.recommended_action]}
+                  </Badge>
+                </div>
+                <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                  Trust-adjusted score {leadDistrict.trust_adjusted_score}, with need {leadDistrict.health_need_score},
+                  scarcity {leadDistrict.facility_scarcity_score}, and evidence trust{' '}
+                  {leadDistrict.evidence_trust_score}.
+                </p>
+              </>
+            ) : (
+              <p className="mt-3 text-sm text-muted-foreground">No district ranking returned.</p>
+            )}
           </div>
         </div>
       </section>
 
-      <section>
-        <div className="mb-3">
-          <h3 className="text-lg font-semibold text-foreground">Coverage snapshot</h3>
-          <p className="text-sm text-muted-foreground">Source: {data.freshness}</p>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          {metrics.map((metric) => <MetricCard key={metric.label} {...metric} />)}
-        </div>
+      <section className="grid gap-4 md:grid-cols-3">
+        {demoPath.map((step) => (
+          <Card key={step.label} className="border-border/70 shadow-sm">
+            <CardContent className="p-4">
+              <p className="text-sm font-semibold text-foreground">{step.label}</p>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">{step.detail}</p>
+            </CardContent>
+          </Card>
+        ))}
       </section>
 
-      <div className="grid gap-5 xl:grid-cols-[1.45fr_0.75fr]">
-        <Card className="shadow-sm">
-          <CardHeader className="flex-row items-start justify-between gap-4">
-            <div>
-              <CardTitle>Districts needing closer review</CardTitle>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Composite of child anaemia, underweight, low ANC coverage, and low insurance coverage.
-              </p>
-            </div>
-            <Badge variant="secondary">Planning signal</Badge>
-          </CardHeader>
-          <CardContent className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
-              <thead>
-                <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="pb-3 font-medium">District</th>
-                  <th className="pb-3 font-medium">Need score</th>
-                  <th className="pb-3 font-medium">Anaemia</th>
-                  <th className="pb-3 font-medium">Underweight</th>
-                  <th className="pb-3 font-medium">4+ ANC</th>
-                  <th className="pb-3 font-medium">Facilities found</th>
+      <Card className="shadow-sm">
+        <CardHeader className="flex-row items-start justify-between gap-4">
+          <div>
+            <CardTitle>Bihar action shortlist</CardTitle>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Ordered by trust-adjusted score. Use this table as the demo’s main artifact.
+            </p>
+          </div>
+          <Badge variant="secondary">{verifyCount} possible data gaps</Badge>
+        </CardHeader>
+        <CardContent className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead>
+              <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
+                <th className="pb-3 font-medium">District</th>
+                <th className="pb-3 font-medium">Action</th>
+                <th className="pb-3 font-medium">Why it ranks</th>
+                <th className="pb-3 font-medium">Score</th>
+                <th className="pb-3 font-medium">Trust</th>
+              </tr>
+            </thead>
+            <tbody>
+              {districts.map((district) => (
+                <tr key={`${district.state_key}-${district.district_key}`} className="border-b last:border-0">
+                  <td className="py-3 pr-3">
+                    <p className="font-medium text-foreground">{district.district_name}</p>
+                    <p className="text-xs text-muted-foreground">{district.facility_count} facilities found</p>
+                  </td>
+                  <td className="py-3 pr-3">
+                    <Badge variant={actionVariant(district.recommended_action)}>
+                      {actionLabels[district.recommended_action]}
+                    </Badge>
+                  </td>
+                  <td className="py-3 pr-3 text-muted-foreground">
+                    Need {district.health_need_score}; scarcity {district.facility_scarcity_score}
+                  </td>
+                  <td className="py-3 pr-3 font-semibold tabular-nums">{district.trust_adjusted_score}</td>
+                  <td className="py-3 tabular-nums">{district.evidence_trust_score}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {data.priorityDistricts.slice(0, 8).map((district) => (
-                  <tr key={`${district.state_key}-${district.district_key}`} className="border-b last:border-0">
-                    <td className="py-3 pr-3">
-                      <p className="font-medium text-foreground">{district.district_name}</p>
-                      <p className="text-xs text-muted-foreground">{district.state_name}</p>
-                    </td>
-                    <td className="py-3 pr-3 font-semibold tabular-nums">{district.health_need_score}</td>
-                    <td className="py-3 pr-3 tabular-nums">{district.child_anaemia_pct}%</td>
-                    <td className="py-3 pr-3 tabular-nums">{district.child_underweight_pct}%</td>
-                    <td className="py-3 pr-3 tabular-nums">{district.four_anc_visits_pct}%</td>
-                    <td className="py-3 tabular-nums">{district.facility_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
 
-        <Card className="shadow-sm">
-          <CardHeader>
-            <CardTitle>Quality review queue</CardTitle>
-            <p className="text-sm text-muted-foreground">Claims that should not drive planning without verification.</p>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data.qualityIssues.map((issue) => (
-              <div key={issue.facility_id} className="rounded-xl border bg-muted/25 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">{issue.name}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {[issue.city, issue.state_or_region, issue.pincode].filter(Boolean).join(' · ')}
-                    </p>
-                  </div>
-                  <Badge variant={issue.capacity_outlier_flag ? 'destructive' : 'outline'}>
-                    {issue.capacity_outlier_flag ? 'Capacity' : 'Coordinate'}
-                  </Badge>
-                </div>
-              </div>
-            ))}
-            <Button variant="outline" className="w-full" asChild>
-              <Link to="/explore">Review facilities</Link>
-            </Button>
-          </CardContent>
-        </Card>
+      <div className="rounded-xl border bg-muted/25 p-4 text-sm text-muted-foreground">
+        <strong className="text-foreground">Evidence base:</strong> {data.freshness}. National source coverage:{' '}
+        {data.metrics.districts.toLocaleString()} NFHS districts, {data.metrics.facilities.toLocaleString()} discovered
+        facility records, and {data.metrics.ambiguous_pincodes.toLocaleString()} ambiguous PIN mappings. Top actions in
+        this brief:{' '}
+        {Object.entries(actionCounts)
+          .map(([action, count]) => `${actionLabels[action as keyof typeof actionLabels]} ${count}`)
+          .join(', ')}
+        .
       </div>
     </div>
   );

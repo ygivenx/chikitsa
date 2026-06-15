@@ -32,9 +32,7 @@ const PLUGIN_PAGES: Record<string, PluginPage> = {
   },
 };
 
-const enabledPages = Object.entries(PLUGIN_PAGES).filter(
-  ([key]) => APP_CONFIG.plugins.includes(key),
-);
+const enabledPages = Object.entries(PLUGIN_PAGES).filter(([key]) => APP_CONFIG.plugins.includes(key));
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -49,13 +47,13 @@ test('smoke test - app loads and displays home page', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Chikitsa Copilot' })).toBeVisible();
   await expect(
-    page.getByRole('heading', { name: 'Find public-health priorities without hiding uncertainty.' }),
+    page.getByRole('heading', { name: 'Which districts should government investigate first?' })
   ).toBeVisible();
-  await expect(page.getByText('Coverage snapshot')).toBeVisible();
+  await expect(page.getByText('Bihar action shortlist')).toBeVisible();
 
-  await expect(page.getByRole('link', { name: 'Overview', exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Explore', exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Plans', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Brief', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Evidence', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Actions', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Copilot', exact: true })).toBeVisible();
   for (const [, plugin] of enabledPages) {
     await expect(page.getByRole('link', { name: plugin.navLabel })).toBeVisible();

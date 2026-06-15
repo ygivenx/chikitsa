@@ -8,9 +8,9 @@ import { OverviewPage } from './pages/OverviewPage';
 import { PlansPage } from './pages/PlansPage';
 
 const navigation = [
-  { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
-  { to: '/explore', label: 'Explore', icon: Search },
-  { to: '/plans', label: 'Plans', icon: ClipboardList },
+  { to: '/', label: 'Brief', icon: LayoutDashboard, end: true },
+  { to: '/explore', label: 'Evidence', icon: Search },
+  { to: '/plans', label: 'Actions', icon: ClipboardList },
   { to: '/copilot', label: 'Copilot', icon: Bot },
 ];
 
@@ -47,7 +47,7 @@ function Brand() {
       </div>
       <div>
         <h1 className="text-base font-semibold tracking-tight text-foreground">Chikitsa Copilot</h1>
-        <p className="text-xs text-muted-foreground">Public-health evidence workspace</p>
+        <p className="text-xs text-muted-foreground">Bihar health-action brief</p>
       </div>
     </div>
   );
@@ -60,10 +60,14 @@ function Layout() {
     <div className="min-h-screen bg-background">
       <aside className="fixed inset-y-0 left-0 z-20 hidden w-64 border-r bg-card px-4 py-5 lg:block">
         <Brand />
-        <div className="mt-8"><NavItems /></div>
+        <div className="mt-8">
+          <NavItems />
+        </div>
         <div className="absolute bottom-5 left-4 right-4 rounded-xl border bg-muted/30 p-3">
-          <p className="text-xs font-medium text-foreground">Demo data</p>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">NFHS-5, India PIN directory, and marketplace facilities.</p>
+          <p className="text-xs font-medium text-foreground">Hackathon MVP</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Bihar-first demo using NFHS-5, India PINs, and marketplace facilities.
+          </p>
         </div>
       </aside>
 
@@ -74,13 +78,19 @@ function Layout() {
               <Menu className="h-5 w-5" />
             </Button>
             <SheetContent side="left" className="w-72">
-              <SheetHeader><SheetTitle className="sr-only">Navigation</SheetTitle></SheetHeader>
+              <SheetHeader>
+                <SheetTitle className="sr-only">Navigation</SheetTitle>
+              </SheetHeader>
               <Brand />
-              <div className="mt-8"><NavItems onNavigate={() => setOpen(false)} /></div>
+              <div className="mt-8">
+                <NavItems onNavigate={() => setOpen(false)} />
+              </div>
             </SheetContent>
           </Sheet>
         </div>
-        <div className="ml-2 lg:hidden"><Brand /></div>
+        <div className="ml-2 lg:hidden">
+          <Brand />
+        </div>
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
           <span className="hidden sm:inline">Evidence is directional, not clinical advice</span>
           <span className="h-2 w-2 rounded-full bg-success" aria-label="System available" />
@@ -88,7 +98,9 @@ function Layout() {
       </header>
 
       <main className="px-4 py-6 lg:ml-64 lg:px-7 lg:py-8">
-        <div className="mx-auto max-w-[1500px]"><Outlet /></div>
+        <div className="mx-auto max-w-[1500px]">
+          <Outlet />
+        </div>
       </main>
     </div>
   );

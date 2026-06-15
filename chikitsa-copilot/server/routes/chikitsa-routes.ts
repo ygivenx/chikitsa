@@ -30,6 +30,7 @@ const CreateInterventionBody = z.object({
   title: z.string().trim().min(3).max(160),
   state: z.string().trim().min(1).max(100),
   district: z.string().trim().min(1).max(100),
+  action_type: z.enum(['build', 'verify', 'upgrade', 'improve_access', 'investigate']).default('investigate'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).default('medium'),
   status: z.enum(['draft', 'review', 'approved', 'active', 'complete']).default('draft'),
   owner: z.string().trim().max(120).optional().default(''),
@@ -38,7 +39,7 @@ const CreateInterventionBody = z.object({
 
 const UpdateInterventionBody = CreateInterventionBody.partial().refine(
   (value) => Object.keys(value).length > 0,
-  'At least one field is required',
+  'At least one field is required'
 );
 
 const CopilotBody = z.object({
@@ -55,6 +56,8 @@ const CREATE_INTERVENTIONS_SQL = `
     title TEXT NOT NULL,
     state TEXT NOT NULL,
     district TEXT NOT NULL,
+    action_type TEXT NOT NULL DEFAULT 'investigate'
+      CHECK (action_type IN ('build', 'verify', 'upgrade', 'improve_access', 'investigate')),
     priority TEXT NOT NULL CHECK (priority IN ('low', 'medium', 'high', 'critical')),
     status TEXT NOT NULL CHECK (status IN ('draft', 'review', 'approved', 'active', 'complete')),
     owner TEXT NOT NULL DEFAULT '',
@@ -64,43 +67,83 @@ const CREATE_INTERVENTIONS_SQL = `
   )
 `;
 
+const ALTER_INTERVENTIONS_ACTION_SQL = `
+  ALTER TABLE chikitsa_app.interventions
+  ADD COLUMN IF NOT EXISTS action_type TEXT NOT NULL DEFAULT 'investigate'
+    CHECK (action_type IN ('build', 'verify', 'upgrade', 'improve_access', 'investigate'))
+`;
+
 const DISTRICT_RANKING_SQL = `
   WITH facility_by_district AS (
     SELECT
       p.state_key,
       p.district_key,
-      COUNT(DISTINCT f.facility_id)::INT AS facility_count
+      COUNT(DISTINCT f.facility_id)::INT AS facility_count,
+      ROUND(AVG(f.completeness_score)::NUMERIC, 2) AS avg_completeness_score,
+      SUM(
+        CASE
+          WHEN f.coordinate_quality <> 'plausible_india'
+            OR f.capacity_outlier_flag
+            OR f.pincode_quality <> 'valid_format'
+          THEN 1
+          ELSE 0
+        END
+      )::INT AS flagged_facility_count
     FROM public.facilities_curated f
     JOIN public.pincode_geography p
       ON f.pincode = p.pincode::TEXT
       AND p.is_unambiguous = true
     GROUP BY p.state_key, p.district_key
+  ),
+  scored AS (
+    SELECT
+      d.state_name,
+      d.state_key,
+      d.district_name,
+      d.district_key,
+      COALESCE(f.facility_count, 0) AS facility_count,
+      COALESCE(f.flagged_facility_count, 0) AS flagged_facility_count,
+      d.child_anaemia_pct,
+      d.child_underweight_pct,
+      d.four_anc_visits_pct,
+      d.health_insurance_pct,
+      d.contains_caution_estimate,
+      d.contains_suppressed_value,
+      ROUND((
+        d.child_anaemia_pct +
+        d.child_underweight_pct +
+        (100 - d.four_anc_visits_pct) +
+        (100 - d.health_insurance_pct)
+      )::NUMERIC / 4, 1)::DOUBLE PRECISION AS health_need_score,
+      ROUND(GREATEST(0, 100 - LEAST(COALESCE(f.facility_count, 0) * 8, 100))::NUMERIC, 1)
+        ::DOUBLE PRECISION AS facility_scarcity_score,
+      ROUND(GREATEST(0, LEAST(100,
+        (COALESCE(f.avg_completeness_score, 0) / 7.0 * 100)
+        - (COALESCE(f.flagged_facility_count, 0)::NUMERIC / GREATEST(COALESCE(f.facility_count, 0), 1) * 30)
+        - CASE WHEN d.contains_caution_estimate THEN 8 ELSE 0 END
+        - CASE WHEN d.contains_suppressed_value THEN 15 ELSE 0 END
+      ))::NUMERIC, 1)::DOUBLE PRECISION AS evidence_trust_score
+    FROM public.district_health_profiles d
+    LEFT JOIN facility_by_district f
+      ON d.state_key = f.state_key AND d.district_key = f.district_key
+    WHERE d.child_anaemia_pct IS NOT NULL
+      AND d.child_underweight_pct IS NOT NULL
+      AND d.four_anc_visits_pct IS NOT NULL
+      AND d.health_insurance_pct IS NOT NULL
   )
   SELECT
-    d.state_name,
-    d.state_key,
-    d.district_name,
-    d.district_key,
-    COALESCE(f.facility_count, 0) AS facility_count,
-    d.child_anaemia_pct,
-    d.child_underweight_pct,
-    d.four_anc_visits_pct,
-    d.health_insurance_pct,
-    d.contains_caution_estimate,
-    d.contains_suppressed_value,
-    ROUND((
-      d.child_anaemia_pct +
-      d.child_underweight_pct +
-      (100 - d.four_anc_visits_pct) +
-      (100 - d.health_insurance_pct)
-    )::NUMERIC / 4, 1) AS health_need_score
-  FROM public.district_health_profiles d
-  LEFT JOIN facility_by_district f
-    ON d.state_key = f.state_key AND d.district_key = f.district_key
-  WHERE d.child_anaemia_pct IS NOT NULL
-    AND d.child_underweight_pct IS NOT NULL
-    AND d.four_anc_visits_pct IS NOT NULL
-    AND d.health_insurance_pct IS NOT NULL
+    *,
+    ROUND((health_need_score * facility_scarcity_score / 100)::NUMERIC, 1)::DOUBLE PRECISION AS desert_score,
+    ROUND((health_need_score * facility_scarcity_score / 100 * (0.65 + evidence_trust_score / 100 * 0.35))::NUMERIC, 1)
+      ::DOUBLE PRECISION AS trust_adjusted_score,
+    CASE
+      WHEN evidence_trust_score < 45 THEN 'verify'
+      WHEN health_need_score >= 60 AND facility_scarcity_score >= 70 THEN 'build'
+      WHEN health_need_score >= 60 AND facility_scarcity_score < 45 THEN 'upgrade'
+      WHEN health_need_score >= 50 AND facility_scarcity_score < 70 THEN 'improve_access'
+      ELSE 'investigate'
+    END AS recommended_action
+  FROM scored
 `;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -138,6 +181,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
   try {
     await appkit.lakebase.query(SETUP_SCHEMA_SQL);
     await appkit.lakebase.query(CREATE_INTERVENTIONS_SQL);
+    await appkit.lakebase.query(ALTER_INTERVENTIONS_ACTION_SQL);
     console.log('[chikitsa] Intervention schema is ready');
   } catch (error) {
     console.warn('[chikitsa] Schema setup deferred:', (error as Error).message);
@@ -165,12 +209,18 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
               (SELECT COUNT(*)::INT FROM public.facilities_curated
                 WHERE coordinate_quality <> 'plausible_india' OR capacity_outlier_flag) AS flagged_facilities
           `),
-          appkit.lakebase.query(`${DISTRICT_RANKING_SQL} ORDER BY health_need_score DESC, facility_count ASC LIMIT 10`),
+          appkit.lakebase.query(
+            `${DISTRICT_RANKING_SQL}
+             WHERE state_key = 'bihar'
+             ORDER BY trust_adjusted_score DESC, desert_score DESC
+             LIMIT 10`
+          ),
           appkit.lakebase.query(`
             SELECT facility_id, name, city, state_or_region, pincode, coordinate_quality,
               reported_capacity, capacity_outlier_flag, completeness_score
             FROM public.facilities_curated
-            WHERE coordinate_quality <> 'plausible_india' OR capacity_outlier_flag
+            WHERE state_key = 'bihar'
+              AND (coordinate_quality <> 'plausible_india' OR capacity_outlier_flag)
             ORDER BY capacity_outlier_flag DESC, completeness_score ASC, name
             LIMIT 8
           `),
@@ -194,10 +244,10 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       try {
         const result = await appkit.lakebase.query(
           `${DISTRICT_RANKING_SQL}
-           AND ($1 = '' OR d.state_key = $1)
-           ORDER BY health_need_score DESC, facility_count ASC
+           WHERE ($1 = '' OR state_key = $1)
+           ORDER BY trust_adjusted_score DESC, desert_score DESC
            LIMIT $2`,
-          [state, limit],
+          [state, limit]
         );
         res.json(result.rows);
       } catch (error) {
@@ -228,7 +278,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             ORDER BY f.completeness_score DESC, f.name
             LIMIT $4
           `,
-          [query, state, district, limit],
+          [query, state, district, limit]
         );
         res.json(result.rows);
       } catch (error) {
@@ -240,7 +290,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
     app.get('/api/interventions', async (_req, res) => {
       try {
         const result = await appkit.lakebase.query(`
-          SELECT id, title, state, district, priority, status, owner, notes, created_at, updated_at
+          SELECT id, title, state, district, action_type, priority, status, owner, notes, created_at, updated_at
           FROM chikitsa_app.interventions
           ORDER BY
             CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
@@ -263,10 +313,19 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       try {
         const result = await appkit.lakebase.query(
           `INSERT INTO chikitsa_app.interventions
-            (title, state, district, priority, status, owner, notes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+            (title, state, district, action_type, priority, status, owner, notes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING *`,
-          [value.title, value.state, value.district, value.priority, value.status, value.owner, value.notes],
+          [
+            value.title,
+            value.state,
+            value.district,
+            value.action_type,
+            value.priority,
+            value.status,
+            value.owner,
+            value.notes,
+          ]
         );
         res.status(201).json(result.rows[0]);
       } catch (error) {
@@ -294,7 +353,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
            SET ${assignments.join(', ')}, updated_at = NOW()
            WHERE id = $${values.length}
            RETURNING *`,
-          values,
+          values
         );
         if (result.rows.length === 0) {
           res.status(404).json({ error: 'Intervention not found.' });
@@ -316,7 +375,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       try {
         const result = await appkit.lakebase.query(
           'DELETE FROM chikitsa_app.interventions WHERE id = $1 RETURNING id',
-          [id.data],
+          [id.data]
         );
         if (result.rows.length === 0) {
           res.status(404).json({ error: 'Intervention not found.' });
@@ -344,11 +403,11 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
         const [districtEvidence, facilityEvidence, qualityEvidence] = await Promise.all([
           appkit.lakebase.query(
             `${DISTRICT_RANKING_SQL}
-             AND ($1 = '' OR d.state_key = $1)
-             AND ($2 = '' OR d.district_key = $2)
-             ORDER BY health_need_score DESC, facility_count ASC
+             WHERE ($1 = '' OR state_key = $1)
+               AND ($2 = '' OR district_key = $2)
+             ORDER BY trust_adjusted_score DESC, desert_score DESC
              LIMIT 8`,
-            [stateKey, districtKey],
+            [stateKey, districtKey]
           ),
           appkit.lakebase.query(
             `
@@ -363,7 +422,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
               ORDER BY f.completeness_score DESC
               LIMIT 12
             `,
-            [stateKey, districtKey],
+            [stateKey, districtKey]
           ),
           appkit.lakebase.query(`
             SELECT
@@ -388,18 +447,22 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'Answer the planning question using only the supplied evidence.',
           'Separate observed facts from inferences. Never present facility counts as complete coverage.',
           'Call out ambiguous geography, suppressed values, caution estimates, coordinate flags, and implausible claims.',
+          'Classify the recommended action as exactly one of: Build, Verify, Upgrade, Improve access, Investigate.',
           'Do not provide medical diagnosis or individual treatment advice.',
-          'Return concise sections: Finding, Evidence, Data quality caveats, Recommended next actions.',
+          'Return concise sections: Finding, Recommended action, Evidence, Data quality caveats, Next verification steps.',
           `Question: ${question}`,
           `Evidence JSON: ${JSON.stringify(evidence)}`,
         ].join('\n\n');
 
-        const modelResponse = await appkit.serving().asUser(req).invoke({
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 1200,
-          reasoning_effort: 'medium',
-          temperature: 0.2,
-        });
+        const modelResponse = await appkit
+          .serving()
+          .asUser(req)
+          .invoke({
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 1200,
+            reasoning_effort: 'medium',
+            temperature: 0.2,
+          });
 
         res.json({
           answer: extractModelContent(modelResponse),

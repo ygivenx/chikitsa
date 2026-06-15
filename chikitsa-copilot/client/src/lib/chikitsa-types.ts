@@ -4,6 +4,7 @@ export interface DistrictPriority {
   district_name: string;
   district_key: string;
   facility_count: number;
+  flagged_facility_count: number;
   child_anaemia_pct: number;
   child_underweight_pct: number;
   four_anc_visits_pct: number;
@@ -11,7 +12,14 @@ export interface DistrictPriority {
   contains_caution_estimate: boolean;
   contains_suppressed_value: boolean;
   health_need_score: number;
+  facility_scarcity_score: number;
+  desert_score: number;
+  evidence_trust_score: number;
+  trust_adjusted_score: number;
+  recommended_action: InterventionAction;
 }
+
+export type InterventionAction = 'build' | 'verify' | 'upgrade' | 'improve_access' | 'investigate';
 
 export interface QualityIssue {
   facility_id: string;
@@ -61,6 +69,7 @@ export interface Intervention {
   title: string;
   state: string;
   district: string;
+  action_type: InterventionAction;
   priority: 'low' | 'medium' | 'high' | 'critical';
   status: 'draft' | 'review' | 'approved' | 'active' | 'complete';
   owner: string;
