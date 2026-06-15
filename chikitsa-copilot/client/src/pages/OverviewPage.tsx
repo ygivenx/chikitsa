@@ -6,6 +6,17 @@ import { fetchJson } from '../lib/api';
 import { actionLabels, actionVariant, biharFocusDistricts } from '../lib/chikitsa-copy';
 import type { Overview } from '../lib/chikitsa-types';
 
+const defaultCopilotQuestion = 'What intervention should the government investigate first in Bihar?';
+
+function copilotLink(question: string, districtKey?: string) {
+  const params = new URLSearchParams({
+    state: 'bihar',
+    q: question,
+  });
+  if (districtKey) params.set('district', districtKey);
+  return `/copilot?${params.toString()}`;
+}
+
 export function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,7 +98,7 @@ export function OverviewPage() {
             </div>
             <div className="mt-5 flex flex-wrap gap-3">
               <Button asChild>
-                <Link to="/copilot">
+                <Link to={copilotLink(defaultCopilotQuestion)}>
                   Ask the demo question <ArrowRight className="ml-2 h-4 w-4" />
                 </Link>
               </Button>
@@ -156,7 +167,15 @@ export function OverviewPage() {
               {districts.map((district) => (
                 <tr key={`${district.state_key}-${district.district_key}`} className="border-b last:border-0">
                   <td className="py-3 pr-3">
-                    <p className="font-medium text-foreground">{district.district_name}</p>
+                    <Link
+                      to={copilotLink(
+                        `For ${district.district_name}, explain the evidence, uncertainty, and recommended next action.`,
+                        district.district_key
+                      )}
+                      className="font-medium text-foreground underline-offset-4 hover:underline"
+                    >
+                      {district.district_name}
+                    </Link>
                     <p className="text-xs text-muted-foreground">{district.facility_count} facilities found</p>
                   </td>
                   <td className="py-3 pr-3">

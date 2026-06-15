@@ -12,6 +12,7 @@ import {
 import DOMPurify from 'dompurify';
 import { Bot, Send } from 'lucide-react';
 import { marked } from 'marked';
+import { useSearchParams } from 'react-router';
 import { SearchableSelect } from '../components/SearchableSelect';
 import { fetchJson } from '../lib/api';
 import type { CopilotResponse, LocationOptions } from '../lib/chikitsa-types';
@@ -23,9 +24,10 @@ const exampleQuestions = [
 ];
 
 export function CopilotPage() {
-  const [question, setQuestion] = useState(exampleQuestions[0]);
-  const [state, setState] = useState('bihar');
-  const [district, setDistrict] = useState('');
+  const [searchParams] = useSearchParams();
+  const [question, setQuestion] = useState(searchParams.get('q') || exampleQuestions[0]);
+  const [state, setState] = useState(searchParams.get('state') || 'bihar');
+  const [district, setDistrict] = useState(searchParams.get('district') || '');
   const [locations, setLocations] = useState<LocationOptions | null>(null);
   const [result, setResult] = useState<CopilotResponse | null>(null);
   const [loading, setLoading] = useState(false);
