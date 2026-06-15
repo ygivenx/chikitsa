@@ -3,8 +3,19 @@ import { Link } from 'react-router';
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Skeleton } from '@databricks/appkit-ui/react';
 import { ArrowRight } from 'lucide-react';
 import { fetchJson } from '../lib/api';
-import { actionLabels, actionVariant, biharFocusDistricts } from '../lib/chikitsa-copy';
-import type { Overview } from '../lib/chikitsa-types';
+import { actionLabels, actionVariant } from '../lib/chikitsa-copy';
+import type { DistrictPriority, Overview } from '../lib/chikitsa-types';
+
+const defaultCopilotQuestion = 'What intervention should the government investigate first across the current evidence?';
+
+function copilotLink(question: string, district?: DistrictPriority) {
+  const params = new URLSearchParams({ q: question });
+  if (district) {
+    params.set('state', district.state_key);
+    params.set('district', district.district_key);
+  }
+  return `/copilot?${params.toString()}`;
+}
 
 export function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
@@ -69,25 +80,25 @@ export function OverviewPage() {
         <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
           <div>
             <Badge variant="outline" className="border-primary/30 bg-background/70 text-foreground">
-              Bihar decision brief
+              National decision brief
             </Badge>
             <h2 className="mt-4 max-w-4xl text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
               Which districts should government investigate first?
             </h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground md:text-base">
-              The app has one job for the demo: rank Bihar districts, explain whether the signal is a real healthcare
-              gap or a data gap, and produce an action class.
+              The app ranks districts, explains whether the signal is a real healthcare gap or a data gap, and produces
+              an action class that can be reviewed by state or district.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
-              {biharFocusDistricts.map((district) => (
-                <Badge key={district} variant="secondary">
-                  {district}
+              {districts.slice(0, 5).map((district) => (
+                <Badge key={`${district.state_key}-${district.district_key}`} variant="secondary">
+                  {district.district_name}, {district.state_name}
                 </Badge>
               ))}
             </div>
             <div className="mt-5 flex flex-wrap gap-3">
               <Button asChild>
-                <Link to="/copilot">
+                <Link to={copilotLink(defaultCopilotQuestion)}>
                   Ask the demo question <ArrowRight className="ml-2 h-4 w-4" />
                 </Link>
               </Button>
@@ -134,7 +145,7 @@ export function OverviewPage() {
       <Card className="shadow-sm">
         <CardHeader className="flex-row items-start justify-between gap-4">
           <div>
-            <CardTitle>Bihar action shortlist</CardTitle>
+            <CardTitle>National action shortlist</CardTitle>
             <p className="mt-1 text-sm text-muted-foreground">
               Ordered by trust-adjusted score. Use this table as the demo’s main artifact.
             </p>
@@ -156,8 +167,18 @@ export function OverviewPage() {
               {districts.map((district) => (
                 <tr key={`${district.state_key}-${district.district_key}`} className="border-b last:border-0">
                   <td className="py-3 pr-3">
-                    <p className="font-medium text-foreground">{district.district_name}</p>
-                    <p className="text-xs text-muted-foreground">{district.facility_count} facilities found</p>
+                    <Link
+                      to={copilotLink(
+                        `For ${district.district_name}, explain the evidence, uncertainty, and recommended next action.`,
+                        district
+                      )}
+                      className="font-medium text-foreground underline-offset-4 hover:underline"
+                    >
+                      {district.district_name}
+                    </Link>
+                    <p className="text-xs text-muted-foreground">
+                      {district.state_name}; {district.facility_count} facilities found
+                    </p>
                   </td>
                   <td className="py-3 pr-3">
                     <Badge variant={actionVariant(district.recommended_action)}>

@@ -12,20 +12,23 @@ import {
 import DOMPurify from 'dompurify';
 import { Bot, Send } from 'lucide-react';
 import { marked } from 'marked';
+import { useSearchParams } from 'react-router';
+import { DistrictStateMap } from '../components/DistrictStateMap';
 import { SearchableSelect } from '../components/SearchableSelect';
 import { fetchJson } from '../lib/api';
 import type { CopilotResponse, LocationOptions } from '../lib/chikitsa-types';
 
 const exampleQuestions = [
-  'What intervention should the government investigate first in Bihar?',
-  'For Purnia, explain the evidence, uncertainty, and recommended next action.',
-  'Which Bihar districts look like data deserts rather than healthcare deserts?',
+  'What intervention should the government investigate first across the current evidence?',
+  'For the selected district, explain the evidence, uncertainty, and recommended next action.',
+  'Which districts look like data deserts rather than healthcare deserts?',
 ];
 
 export function CopilotPage() {
-  const [question, setQuestion] = useState(exampleQuestions[0]);
-  const [state, setState] = useState('bihar');
-  const [district, setDistrict] = useState('');
+  const [searchParams] = useSearchParams();
+  const [question, setQuestion] = useState(() => searchParams.get('q') || exampleQuestions[0]);
+  const [state, setState] = useState(() => searchParams.get('state')?.trim().toLowerCase() || '');
+  const [district, setDistrict] = useState(() => searchParams.get('district')?.trim().toLowerCase() || '');
   const [locations, setLocations] = useState<LocationOptions | null>(null);
   const [result, setResult] = useState<CopilotResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -49,26 +52,30 @@ export function CopilotPage() {
   }, [state]);
 
   const stateOptions = useMemo(
-    () =>
-      locations?.states.map((option) => ({
+    () => [
+      { value: '', label: 'All states', description: 'National scope' },
+      ...(locations?.states.map((option) => ({
         value: option.state_key,
         label: option.state_name,
         description: `${option.district_count} districts`,
-      })) ?? [],
+      })) ?? []),
+    ],
     [locations]
   );
 
   const districtOptions = useMemo(
     () => [
-      { value: '', label: 'All districts', description: 'Within selected state' },
+      { value: '', label: 'All districts', description: state ? 'Within selected state' : 'Select a state first' },
       ...(locations?.districts.map((option) => ({
         value: option.district_key,
         label: option.district_name,
         description: option.state_name,
       })) ?? []),
     ],
-    [locations]
+    [locations, state]
   );
+
+  const selectedStateName = stateOptions.find((option) => option.value === state)?.label;
 
   async function analyze(event: React.FormEvent) {
     event.preventDefault();
@@ -93,7 +100,7 @@ export function CopilotPage() {
     <div className="space-y-6">
       <div>
         <Badge variant="outline">
-          <Bot className="mr-1 h-3.5 w-3.5" /> Bihar copilot
+          <Bot className="mr-1 h-3.5 w-3.5" /> Planning copilot
         </Badge>
         <h2 className="mt-3 text-3xl font-semibold tracking-tight text-foreground">
           Ask the one question the demo is built around
@@ -105,65 +112,69 @@ export function CopilotPage() {
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.7fr_1.3fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle>Question</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form
-              onSubmit={(event) => {
-                void analyze(event);
-              }}
-              className="space-y-4"
-            >
-              <Textarea
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                className="min-h-32"
-                placeholder="Ask about district health burden, facility evidence, or data quality"
-                required
-                minLength={8}
-              />
-              <SearchableSelect
-                id="copilot-state"
-                label="State focus"
-                value={state}
-                options={stateOptions}
-                onChange={(nextState) => {
-                  setState(nextState);
-                  setDistrict('');
+        <div className="space-y-5">
+          <Card>
+            <CardHeader>
+              <CardTitle>Question</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form
+                onSubmit={(event) => {
+                  void analyze(event);
                 }}
-                placeholder="Type a state"
-              />
-              <SearchableSelect
-                id="copilot-district"
-                label="District focus"
-                value={district}
-                options={districtOptions}
-                onChange={setDistrict}
-                placeholder="Optional district focus"
-                disabled={!locations}
-              />
-              <div className="space-y-2">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Use one prompt</p>
-                {exampleQuestions.map((example) => (
-                  <button
-                    key={example}
-                    type="button"
-                    className="block w-full rounded-lg border px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    onClick={() => setQuestion(example)}
-                  >
-                    {example}
-                  </button>
-                ))}
-              </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={loading || question.trim().length < 8}>
-                <Send className="mr-2 h-4 w-4" /> {loading ? 'Analyzing evidence…' : 'Analyze evidence'}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+                className="space-y-4"
+              >
+                <Textarea
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  className="min-h-32"
+                  placeholder="Ask about district health burden, facility evidence, or data quality"
+                  required
+                  minLength={8}
+                />
+                <SearchableSelect
+                  id="copilot-state"
+                  label="State focus"
+                  value={state}
+                  options={stateOptions}
+                  onChange={(nextState) => {
+                    setState(nextState);
+                    setDistrict('');
+                  }}
+                  placeholder="Type a state"
+                />
+                <SearchableSelect
+                  id="copilot-district"
+                  label="District focus"
+                  value={district}
+                  options={districtOptions}
+                  onChange={setDistrict}
+                  placeholder={state ? 'Optional district focus' : 'Select a state first'}
+                  disabled={!locations || !state}
+                />
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Use one prompt</p>
+                  {exampleQuestions.map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      className="block w-full rounded-lg border px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      onClick={() => setQuestion(example)}
+                    >
+                      {example}
+                    </button>
+                  ))}
+                </div>
+                {error && <p className="text-sm text-destructive">{error}</p>}
+                <Button type="submit" className="w-full" disabled={loading || question.trim().length < 8}>
+                  <Send className="mr-2 h-4 w-4" /> {loading ? 'Analyzing evidence…' : 'Analyze evidence'}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+
+          <DistrictStateMap stateKey={state} stateName={selectedStateName} districtKey={district} />
+        </div>
 
         <Card className="min-h-[520px]">
           <CardHeader>
@@ -198,8 +209,11 @@ export function CopilotPage() {
                 <div className="rounded-xl border bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
                   <p>
                     <strong className="text-foreground">Grounding:</strong> {result.evidence.districts.length} district
-                    rows, {result.evidence.facilitySummaryByDistrict.length} facility-summary rows, and{' '}
-                    {result.evidence.facilitySamples.length} facility sample rows; {result.evidence.sourcePeriod}.
+                    rows and {result.evidence.facilitySummaryByDistrict.length} facility-summary rows;{' '}
+                    {result.evidence.sourcePeriod}.
+                  </p>
+                  <p className="mt-2">
+                    Facility record examples are used for QA only; the facility snapshot is not a registry.
                   </p>
                   <p className="mt-2">District coverage: {result.evidence.retrievalScope.districtCoverage}.</p>
                   <p className="mt-2">

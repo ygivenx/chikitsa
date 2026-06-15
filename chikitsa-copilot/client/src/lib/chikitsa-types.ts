@@ -3,7 +3,12 @@ export interface DistrictPriority {
   state_key: string;
   district_name: string;
   district_key: string;
+  district_geo_key?: string;
   facility_count: number;
+  public_facility_count?: number;
+  private_facility_count?: number;
+  unknown_operator_count?: number;
+  geocoded_facility_count?: number;
   flagged_facility_count: number;
   child_anaemia_pct: number;
   child_underweight_pct: number;
@@ -16,6 +21,19 @@ export interface DistrictPriority {
   desert_score: number;
   evidence_trust_score: number;
   trust_adjusted_score: number;
+  desert_area_pct?: number;
+  desert_area_pct_trust_adjusted?: number;
+  desert_population?: number | null;
+  desert_population_pct?: number | null;
+  desert_population_trust_adjusted?: number | null;
+  desert_population_pct_trust_adjusted?: number | null;
+  t_facility_presence?: number;
+  t_geocoding?: number | null;
+  t_pin_unambiguous?: number | null;
+  t_flagged_inverse?: number | null;
+  t_indicator_quality?: number;
+  t_external_verification?: number | null;
+  signals_version?: string;
   recommended_action: InterventionAction;
 }
 
@@ -65,6 +83,57 @@ export interface IndiaMapOverview {
   states: IndiaMapState[];
   freshness: string;
   assignmentMethod: string;
+}
+
+export type PlanningSignal = DistrictPriority;
+
+export interface DesertHex {
+  h3_index: string;
+  is_covered: boolean;
+  is_covered_trust_adjusted: boolean;
+  population: number | null;
+  nearest_facility_distance_km: number | null;
+  district_key: string | null;
+}
+
+export interface StateCoverageResponse {
+  state_key: string;
+  resolution: number;
+  base_radius_km: number;
+  hexes: DesertHex[];
+  totals: {
+    total_population: number;
+    desert_population_base: number;
+    desert_population_trust_adjusted: number;
+    total_area_hexes: number;
+    desert_area_hexes_base: number;
+    desert_area_hexes_trust_adjusted: number;
+  };
+}
+
+export interface StateFacility {
+  facility_id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  operator_type: 'public' | 'private' | 'unknown' | null;
+  places_matched: boolean;
+}
+
+export interface StateDistrictsResponse {
+  state_key: string;
+  districts: PlanningSignal[];
+  freshness: string;
+  geometry_url: string;
+}
+
+export interface QualityContamination {
+  contaminated_shift: number;
+  recovered_from_address: number;
+  missing_state: number;
+  ambiguous_pincodes: number;
+  suppressed_nfhs_districts: number;
+  caution_nfhs_districts: number;
 }
 
 export interface LocationOptions {
@@ -128,8 +197,8 @@ export interface CopilotResponse {
       districtRowLimit: number;
       districtCoverage: string;
       facilitySummaryRowsReturned: number;
-      facilitySampleRowsReturned: number;
-      facilitySampleLimit: number;
+      facilityExampleRowsReturned: number;
+      facilityExampleLimit: number;
     };
   };
   trust: {
@@ -138,4 +207,22 @@ export interface CopilotResponse {
     dataExecution: string;
     retrieval: string;
   };
+}
+
+export interface CopilotReview {
+  author_name: string;
+  author_url: string | null;
+  rating: number;
+  language: string | null;
+  publish_time: string;
+  text: string;
+}
+
+export interface CopilotReviewsResponse {
+  facility_id: string;
+  place_id: string | null;
+  google_maps_uri: string | null;
+  attribution: string;
+  reviews: CopilotReview[];
+  reason?: 'no_match' | 'api_error';
 }

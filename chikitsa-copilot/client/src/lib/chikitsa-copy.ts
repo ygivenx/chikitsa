@@ -16,8 +16,6 @@ export const actionDescriptions: Record<InterventionAction, string> = {
   investigate: 'Context correlates with poor coverage and needs deeper review.',
 };
 
-export const biharFocusDistricts = ['Purnia', 'Katihar', 'Saharsa', 'Kishanganj', 'Jehanabad'];
-
 export function actionVariant(action: InterventionAction) {
   if (action === 'build') return 'destructive';
   if (action === 'verify') return 'outline';

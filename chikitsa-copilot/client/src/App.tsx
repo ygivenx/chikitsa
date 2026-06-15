@@ -49,7 +49,7 @@ function Brand() {
       </div>
       <div>
         <h1 className="text-base font-semibold tracking-tight text-foreground">Chikitsa Copilot</h1>
-        <p className="text-xs text-muted-foreground">Bihar health-action brief</p>
+        <p className="text-xs text-muted-foreground">India health-action planner</p>
       </div>
     </div>
   );
@@ -68,7 +68,7 @@ function Layout() {
         <div className="absolute bottom-5 left-4 right-4 rounded-xl border bg-muted/30 p-3">
           <p className="text-xs font-medium text-foreground">Hackathon MVP</p>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            Bihar-first demo using NFHS-5, India PINs, and marketplace facilities.
+            India planning demo using NFHS-5, PIN geography, and marketplace facilities.
           </p>
         </div>
       </aside>

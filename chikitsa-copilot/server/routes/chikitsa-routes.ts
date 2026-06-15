@@ -73,6 +73,23 @@ const ALTER_INTERVENTIONS_ACTION_SQL = `
     CHECK (action_type IN ('build', 'verify', 'upgrade', 'improve_access', 'investigate'))
 `;
 
+const CREATE_EXTERNAL_MATCH_SQL = `
+  CREATE TABLE IF NOT EXISTS chikitsa_app.facility_external_match (
+    facility_id TEXT PRIMARY KEY,
+    place_id TEXT,
+    place_display_name TEXT,
+    formatted_address TEXT,
+    rating DOUBLE PRECISION,
+    user_rating_count INT,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    match_confidence TEXT NOT NULL DEFAULT 'none'
+      CHECK (match_confidence IN ('high', 'medium', 'low', 'none')),
+    matched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    error TEXT
+  )
+`;
+
 const DISTRICT_RANKING_SQL = `
   WITH facility_by_district AS (
     SELECT
@@ -146,6 +163,47 @@ const DISTRICT_RANKING_SQL = `
   FROM scored
 `;
 
+const PLANNING_SIGNALS_SELECT_SQL = `
+  SELECT
+    state_name,
+    state_key,
+    district_name,
+    district_key,
+    COALESCE(district_geo_key, district_key) AS district_geo_key,
+    facility_count,
+    COALESCE(public_facility_count, 0) AS public_facility_count,
+    COALESCE(private_facility_count, 0) AS private_facility_count,
+    COALESCE(unknown_operator_count, 0) AS unknown_operator_count,
+    COALESCE(geocoded_facility_count, 0) AS geocoded_facility_count,
+    COALESCE(flagged_facility_count, 0) AS flagged_facility_count,
+    child_anaemia_pct,
+    child_underweight_pct,
+    four_anc_visits_pct,
+    health_insurance_pct,
+    contains_caution_estimate,
+    contains_suppressed_value,
+    health_need_score,
+    facility_scarcity_score,
+    desert_score,
+    evidence_trust_score,
+    trust_adjusted_score,
+    COALESCE(desert_area_pct, facility_scarcity_score) AS desert_area_pct,
+    COALESCE(desert_area_pct_trust_adjusted, facility_scarcity_score) AS desert_area_pct_trust_adjusted,
+    desert_population,
+    desert_population_pct,
+    desert_population_trust_adjusted,
+    desert_population_pct_trust_adjusted,
+    COALESCE(t_facility_presence, GREATEST(0, 100 - facility_scarcity_score)) AS t_facility_presence,
+    t_geocoding,
+    t_pin_unambiguous,
+    t_flagged_inverse,
+    t_indicator_quality,
+    t_external_verification,
+    recommended_action,
+    COALESCE(signals_version, 'district_planning_signals') AS signals_version
+  FROM public.district_planning_signals
+`;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -177,6 +235,32 @@ function parseLimit(value: unknown, fallback: number, maximum: number) {
   return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), maximum) : fallback;
 }
 
+function parseStateKey(value: unknown) {
+  if (typeof value !== 'string') return null;
+  const stateKey = value.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9 _-]{0,120}$/.test(stateKey) ? stateKey : null;
+}
+
+function toNumber(value: unknown, fallback = 0) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+async function queryWithFallback(
+  appkit: ChikitsaAppKit,
+  primarySql: string,
+  fallbackSql: string,
+  params: unknown[] = [],
+) {
+  try {
+    return await appkit.lakebase.query(primarySql, params);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[chikitsa] Falling back to inline planning SQL:', message);
+    return appkit.lakebase.query(fallbackSql, params);
+  }
+}
+
 function findPayloadWithChoices(value: unknown, depth = 0): (Record<string, unknown> & { choices: unknown[] }) | null {
   if (!isRecord(value) || depth > 6) return null;
   if (Array.isArray(value.choices)) return { ...value, choices: value.choices };
@@ -190,13 +274,18 @@ function findPayloadWithChoices(value: unknown, depth = 0): (Record<string, unkn
 }
 
 export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
-  try {
-    await appkit.lakebase.query(SETUP_SCHEMA_SQL);
-    await appkit.lakebase.query(CREATE_INTERVENTIONS_SQL);
-    await appkit.lakebase.query(ALTER_INTERVENTIONS_ACTION_SQL);
-    console.log('[chikitsa] Intervention schema is ready');
-  } catch (error) {
-    console.warn('[chikitsa] Schema setup deferred:', (error as Error).message);
+  for (const [label, sql] of [
+    ['schema', SETUP_SCHEMA_SQL],
+    ['interventions', CREATE_INTERVENTIONS_SQL],
+    ['intervention action migration', ALTER_INTERVENTIONS_ACTION_SQL],
+    ['external match', CREATE_EXTERNAL_MATCH_SQL],
+  ] as const) {
+    try {
+      await appkit.lakebase.query(sql);
+      console.log(`[chikitsa] ${label} is ready`);
+    } catch (error) {
+      console.warn(`[chikitsa] ${label} setup deferred:`, (error as Error).message);
+    }
   }
 
   appkit.server.extend((app) => {
@@ -221,18 +310,20 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
               (SELECT COUNT(*)::INT FROM public.facilities_curated
                 WHERE coordinate_quality <> 'plausible_india' OR capacity_outlier_flag) AS flagged_facilities
           `),
-          appkit.lakebase.query(
-            `${DISTRICT_RANKING_SQL}
-             WHERE state_key = 'bihar'
+          queryWithFallback(
+            appkit,
+            `${PLANNING_SIGNALS_SELECT_SQL}
              ORDER BY trust_adjusted_score DESC, desert_score DESC
-             LIMIT 10`
+             LIMIT 10`,
+            `${DISTRICT_RANKING_SQL}
+             ORDER BY trust_adjusted_score DESC, desert_score DESC
+             LIMIT 10`,
           ),
           appkit.lakebase.query(`
             SELECT facility_id, name, city, state_or_region, pincode, coordinate_quality,
               reported_capacity, capacity_outlier_flag, completeness_score
             FROM public.facilities_curated
-            WHERE state_key = 'bihar'
-              AND (coordinate_quality <> 'plausible_india' OR capacity_outlier_flag)
+            WHERE coordinate_quality <> 'plausible_india' OR capacity_outlier_flag
             ORDER BY capacity_outlier_flag DESC, completeness_score ASC, name
             LIMIT 8
           `),
@@ -255,7 +346,13 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
       const district = typeof req.query.district === 'string' ? req.query.district.trim().toLowerCase() : '';
       try {
-        const result = await appkit.lakebase.query(
+        const result = await queryWithFallback(
+          appkit,
+          `${PLANNING_SIGNALS_SELECT_SQL}
+           WHERE ($1 = '' OR state_key = $1)
+             AND ($2 = '' OR district_key = $2)
+           ORDER BY trust_adjusted_score DESC, desert_score DESC
+           LIMIT $3`,
           `${DISTRICT_RANKING_SQL}
            WHERE ($1 = '' OR state_key = $1)
              AND ($2 = '' OR district_key = $2)
@@ -303,7 +400,45 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
 
     app.get('/api/map/india', async (_req, res) => {
       try {
-        const result = await appkit.lakebase.query(`
+        const result = await queryWithFallback(
+          appkit,
+          `
+          WITH ranked AS (
+            ${PLANNING_SIGNALS_SELECT_SQL}
+          ),
+          top_district AS (
+            SELECT *
+            FROM (
+              SELECT
+                ranked.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY state_key
+                  ORDER BY trust_adjusted_score DESC, desert_score DESC
+                ) AS state_rank
+              FROM ranked
+            ) ordered
+            WHERE state_rank = 1
+          )
+          SELECT
+            r.state_name,
+            r.state_key,
+            COUNT(*)::INT AS district_count,
+            SUM(r.facility_count)::INT AS facility_count,
+            ROUND(AVG(r.desert_score)::NUMERIC, 1)::DOUBLE PRECISION AS avg_desert_score,
+            ROUND(AVG(r.evidence_trust_score)::NUMERIC, 1)::DOUBLE PRECISION AS avg_evidence_confidence,
+            ROUND(MAX(r.trust_adjusted_score)::NUMERIC, 1)::DOUBLE PRECISION AS max_trust_adjusted_score,
+            SUM(CASE WHEN r.recommended_action = 'build' THEN 1 ELSE 0 END)::INT AS build_count,
+            SUM(CASE WHEN r.recommended_action = 'verify' THEN 1 ELSE 0 END)::INT AS verify_count,
+            MAX(t.district_name) AS top_district_name,
+            MAX(t.recommended_action) AS top_district_action,
+            ROUND(MAX(t.trust_adjusted_score)::NUMERIC, 1)::DOUBLE PRECISION AS top_district_score
+          FROM ranked r
+          JOIN top_district t
+            ON r.state_key = t.state_key
+          GROUP BY r.state_name, r.state_key
+          ORDER BY max_trust_adjusted_score DESC, avg_desert_score DESC
+        `,
+          `
           WITH ranked AS (
             ${DISTRICT_RANKING_SQL}
           ),
@@ -338,7 +473,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             ON r.state_key = t.state_key
           GROUP BY r.state_name, r.state_key
           ORDER BY max_trust_adjusted_score DESC, avg_desert_score DESC
-        `);
+        `
+        );
 
         res.json({
           states: result.rows,
@@ -349,6 +485,184 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       } catch (error) {
         console.error('[chikitsa] Failed to load India map:', error);
         res.status(500).json({ error: 'Failed to load India healthcare desert map.' });
+      }
+    });
+
+    app.get('/api/map/state/:stateKey/districts', async (req, res) => {
+      const stateKey = parseStateKey(req.params.stateKey);
+      if (!stateKey) {
+        res.status(400).json({ error: 'Invalid state key.' });
+        return;
+      }
+
+      try {
+        const result = await queryWithFallback(
+          appkit,
+          `${PLANNING_SIGNALS_SELECT_SQL}
+           WHERE state_key = $1
+           ORDER BY trust_adjusted_score DESC, desert_score DESC`,
+          `${DISTRICT_RANKING_SQL}
+           WHERE state_key = $1
+           ORDER BY trust_adjusted_score DESC, desert_score DESC`,
+          [stateKey],
+        );
+
+        res.json({
+          state_key: stateKey,
+          districts: result.rows,
+          freshness: 'NFHS-5 2019-2021; facility marketplace snapshot',
+          geometry_url: `/geo/states/${encodeURIComponent(stateKey)}.json`,
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load state districts:', error);
+        res.status(500).json({ error: 'Failed to load state districts.' });
+      }
+    });
+
+    app.get('/api/map/state/:stateKey/coverage', async (req, res) => {
+      const stateKey = parseStateKey(req.params.stateKey);
+      if (!stateKey) {
+        res.status(400).json({ error: 'Invalid state key.' });
+        return;
+      }
+
+      try {
+        const result = await queryWithFallback(
+          appkit,
+          `
+            SELECT
+              h3_index,
+              is_covered,
+              is_covered_trust_adjusted,
+              population,
+              nearest_facility_distance_km,
+              district_key
+            FROM public.desert_grid
+            WHERE state_key = $1
+            ORDER BY district_key, h3_index
+          `,
+          `
+            SELECT
+              district_key AS h3_index,
+              facility_scarcity_score < 50 AS is_covered,
+              trust_adjusted_score < desert_score AS is_covered_trust_adjusted,
+              NULL::DOUBLE PRECISION AS population,
+              NULL::DOUBLE PRECISION AS nearest_facility_distance_km,
+              district_key
+            FROM (${DISTRICT_RANKING_SQL}) ranked
+            WHERE state_key = $1
+            ORDER BY district_key
+          `,
+          [stateKey],
+        );
+
+        const totalAreaHexes = result.rows.length;
+        const desertAreaHexesBase = result.rows.filter((row) => row.is_covered !== true).length;
+        const desertAreaHexesTrustAdjusted = result.rows.filter((row) => row.is_covered_trust_adjusted !== true).length;
+        const totalPopulation = result.rows.reduce((sum, row) => sum + toNumber(row.population), 0);
+        const desertPopulationBase = result.rows.reduce(
+          (sum, row) => sum + (row.is_covered === true ? 0 : toNumber(row.population)),
+          0,
+        );
+        const desertPopulationTrustAdjusted = result.rows.reduce(
+          (sum, row) => sum + (row.is_covered_trust_adjusted === true ? 0 : toNumber(row.population)),
+          0,
+        );
+
+        res.json({
+          state_key: stateKey,
+          resolution: 6,
+          base_radius_km: 10,
+          hexes: result.rows,
+          totals: {
+            total_population: totalPopulation,
+            desert_population_base: desertPopulationBase,
+            desert_population_trust_adjusted: desertPopulationTrustAdjusted,
+            total_area_hexes: totalAreaHexes,
+            desert_area_hexes_base: desertAreaHexesBase,
+            desert_area_hexes_trust_adjusted: desertAreaHexesTrustAdjusted,
+          },
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load state coverage:', error);
+        res.status(500).json({ error: 'Failed to load state coverage.' });
+      }
+    });
+
+    app.get('/api/map/state/:stateKey/facilities', async (req, res) => {
+      const stateKey = parseStateKey(req.params.stateKey);
+      if (!stateKey) {
+        res.status(400).json({ error: 'Invalid state key.' });
+        return;
+      }
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            SELECT
+              facility_id,
+              name,
+              latitude,
+              longitude,
+              CASE
+                WHEN LOWER(COALESCE(operator_type, '')) LIKE '%public%' THEN 'public'
+                WHEN LOWER(COALESCE(operator_type, '')) LIKE '%private%' THEN 'private'
+                ELSE 'unknown'
+              END AS operator_type,
+              false AS places_matched
+            FROM public.facilities_curated
+            WHERE state_key = $1
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND coordinate_quality = 'plausible_india'
+            ORDER BY name
+            LIMIT 5000
+          `,
+          [stateKey],
+        );
+        res.json(result.rows);
+      } catch (error) {
+        console.error('[chikitsa] Failed to load state facilities:', error);
+        res.status(500).json({ error: 'Failed to load state facilities.' });
+      }
+    });
+
+    app.get('/api/quality/contamination', async (_req, res) => {
+      try {
+        const result = await queryWithFallback(
+          appkit,
+          `
+            SELECT
+              (SELECT COUNT(*)::INT FROM public.facilities_curated WHERE facility_row_quality = 'contaminated_shift')
+                AS contaminated_shift,
+              (SELECT COUNT(*)::INT FROM public.facilities_curated WHERE state_key_quality = 'recovered_from_address')
+                AS recovered_from_address,
+              (SELECT COUNT(*)::INT FROM public.facilities_curated WHERE state_key_quality = 'missing')
+                AS missing_state,
+              (SELECT COUNT(*)::INT FROM public.pincode_geography WHERE NOT is_unambiguous)
+                AS ambiguous_pincodes,
+              (SELECT COUNT(*)::INT FROM public.district_health_profiles WHERE contains_suppressed_value)
+                AS suppressed_nfhs_districts,
+              (SELECT COUNT(*)::INT FROM public.district_health_profiles WHERE contains_caution_estimate)
+                AS caution_nfhs_districts
+          `,
+          `
+            SELECT
+              0::INT AS contaminated_shift,
+              0::INT AS recovered_from_address,
+              (SELECT COUNT(*)::INT FROM public.facilities_curated WHERE state_key IS NULL) AS missing_state,
+              (SELECT COUNT(*)::INT FROM public.pincode_geography WHERE NOT is_unambiguous)
+                AS ambiguous_pincodes,
+              (SELECT COUNT(*)::INT FROM public.district_health_profiles WHERE contains_suppressed_value)
+                AS suppressed_nfhs_districts,
+              (SELECT COUNT(*)::INT FROM public.district_health_profiles WHERE contains_caution_estimate)
+                AS caution_nfhs_districts
+          `,
+        );
+        res.json(result.rows[0]);
+      } catch (error) {
+        console.error('[chikitsa] Failed to load contamination summary:', error);
+        res.status(500).json({ error: 'Failed to load quality summary.' });
       }
     });
 
@@ -499,7 +813,13 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
 
       try {
         const [districtEvidence, facilitySummary, facilitySamples, qualityEvidence] = await Promise.all([
-          appkit.lakebase.query(
+          queryWithFallback(
+            appkit,
+            `${PLANNING_SIGNALS_SELECT_SQL}
+             WHERE ($1 = '' OR state_key = $1)
+               AND ($2 = '' OR district_key = $2)
+             ORDER BY trust_adjusted_score DESC, desert_score DESC
+             LIMIT $3`,
             `${DISTRICT_RANKING_SQL}
              WHERE ($1 = '' OR state_key = $1)
                AND ($2 = '' OR district_key = $2)
@@ -594,8 +914,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
                 ? 'complete for requested state or district, up to the configured safety limit'
                 : 'national ranking capped for prompt size',
             facilitySummaryRowsReturned: facilitySummary.rows.length,
-            facilitySampleRowsReturned: facilitySamples.rows.length,
-            facilitySampleLimit,
+            facilityExampleRowsReturned: facilitySamples.rows.length,
+            facilityExampleLimit: facilitySampleLimit,
           },
         };
 
@@ -603,12 +923,15 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'You are an evidence-aware public-health planning copilot for India.',
           'Answer the planning question using only the supplied evidence.',
           'Return only the final answer. Do not include a thinking process, scratchpad, or self-review.',
-          'Separate observed facts from inferences. Never present facility counts as complete coverage.',
+          'Separate observed facts from inferences. Describe facility counts as discovered facility snapshot evidence, not as a full registry.',
+          'Do not use the phrase "complete coverage" in the final answer.',
           'The districts array is the authoritative ranked district evidence for the requested scope.',
-          'The facilitySummaryByDistrict array contains aggregate facility evidence for the requested scope.',
-          'The facilitySamples array is only a bounded sample of records; never describe it as all facilities.',
-          'Use retrievalScope when describing how many rows were reviewed.',
+          'Use facilitySummaryByDistrict for facility count, coordinate quality, capacity flag, completeness, and ambiguous PIN evidence.',
+          'The facilitySamples array contains example facility records for QA only; do not summarize it as coverage.',
+          'Do not mention sample limits in the final answer unless a specific example record creates a data-quality caveat.',
+          'Use retrievalScope when describing district coverage or evidence reviewed.',
           'Call out ambiguous geography, suppressed values, caution estimates, coordinate flags, and implausible claims.',
+          'When present, cite desert_area_pct, desert_area_pct_trust_adjusted, and the named trust components driving the action class.',
           'Classify the recommended action as exactly one of: Build, Verify, Upgrade, Improve access, Investigate.',
           'Do not provide medical diagnosis or individual treatment advice.',
           'Return concise sections: Finding, Recommended action, Evidence, Data quality caveats, Next verification steps.',
@@ -639,6 +962,63 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       } catch (error) {
         console.error('[chikitsa] Copilot analysis failed:', error);
         res.status(500).json({ error: 'The copilot could not complete this analysis.' });
+      }
+    });
+
+    app.get('/api/copilot/reviews', async (req, res) => {
+      const facilityId = typeof req.query.facility_id === 'string' ? req.query.facility_id.trim() : '';
+      if (!facilityId) {
+        res.status(400).json({ error: 'facility_id is required.' });
+        return;
+      }
+
+      try {
+        const match = await appkit.lakebase.query(
+          `
+            SELECT facility_id, place_id
+            FROM chikitsa_app.facility_external_match
+            WHERE facility_id = $1
+              AND place_id IS NOT NULL
+              AND match_confidence IN ('high', 'medium', 'low')
+          `,
+          [facilityId],
+        );
+
+        const placeId = typeof match.rows[0]?.place_id === 'string' ? match.rows[0].place_id : null;
+        if (!placeId) {
+          res.json({
+            facility_id: facilityId,
+            place_id: null,
+            google_maps_uri: null,
+            attribution: 'Reviews from Google Maps',
+            reviews: [],
+            reason: 'no_match',
+          });
+          return;
+        }
+
+        if (!process.env.GOOGLE_PLACES_API_KEY) {
+          res.json({
+            facility_id: facilityId,
+            place_id: placeId,
+            google_maps_uri: `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(placeId)}`,
+            attribution: 'Reviews from Google Maps',
+            reviews: [],
+            reason: 'api_error',
+          });
+          return;
+        }
+
+        res.json({
+          facility_id: facilityId,
+          place_id: placeId,
+          google_maps_uri: `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(placeId)}`,
+          attribution: 'Reviews from Google Maps',
+          reviews: [],
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load copilot reviews:', error);
+        res.status(500).json({ error: 'Failed to load facility reviews.' });
       }
     });
   });

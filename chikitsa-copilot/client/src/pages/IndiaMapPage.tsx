@@ -1,11 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Badge, Card, CardContent, CardHeader, CardTitle, Skeleton } from '@databricks/appkit-ui/react';
-import { MapPinned } from 'lucide-react';
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Skeleton } from '@databricks/appkit-ui/react';
+import { ArrowLeft, MapPinned } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
 import * as echarts from 'echarts';
 import { fetchJson } from '../lib/api';
 import { actionLabels, actionVariant } from '../lib/chikitsa-copy';
-import type { IndiaMapOverview, IndiaMapState } from '../lib/chikitsa-types';
+import type {
+  IndiaMapOverview,
+  IndiaMapState,
+  PlanningSignal,
+  StateCoverageResponse,
+  StateDistrictsResponse,
+  StateFacility,
+} from '../lib/chikitsa-types';
 
 interface IndiaAdm1GeoJson {
   type: 'FeatureCollection';
@@ -58,6 +65,13 @@ export function IndiaMapPage() {
   const [boundaryGeoJson, setBoundaryGeoJson] = useState<IndiaAdm1GeoJson | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [mode, setMode] = useState<'india' | 'state'>('india');
+  const [trustAdjusted, setTrustAdjusted] = useState(false);
+  const [stateDistricts, setStateDistricts] = useState<PlanningSignal[]>([]);
+  const [stateCoverage, setStateCoverage] = useState<StateCoverageResponse | null>(null);
+  const [stateFacilities, setStateFacilities] = useState<StateFacility[]>([]);
+  const [stateDrillError, setStateDrillError] = useState<string | null>(null);
+  const [stateDrillLoading, setStateDrillLoading] = useState(false);
 
   useEffect(() => {
     void Promise.all([fetchJson<IndiaMapOverview>('/api/map/india'), fetchJson<IndiaAdm1GeoJson>('/india-adm1.json')])
@@ -76,6 +90,27 @@ export function IndiaMapPage() {
     if (!data) return null;
     return data.states.find((state) => state.state_key === selectedKey) ?? data.states[0] ?? null;
   }, [data, selectedKey]);
+
+  useEffect(() => {
+    if (!selectedKey || mode !== 'state') return;
+    void Promise.all([
+      fetchJson<StateDistrictsResponse>(`/api/map/state/${encodeURIComponent(selectedKey)}/districts`),
+      fetchJson<StateCoverageResponse>(`/api/map/state/${encodeURIComponent(selectedKey)}/coverage`),
+      fetchJson<StateFacility[]>(`/api/map/state/${encodeURIComponent(selectedKey)}/facilities`),
+    ])
+      .then(([districtPayload, coveragePayload, facilitiesPayload]) => {
+        setStateDistricts(districtPayload.districts);
+        setStateCoverage(coveragePayload);
+        setStateFacilities(facilitiesPayload);
+      })
+      .catch((reason: unknown) => {
+        setStateDrillError(reason instanceof Error ? reason.message : 'Failed to load state drill-down.');
+        setStateDistricts([]);
+        setStateCoverage(null);
+        setStateFacilities([]);
+      })
+      .finally(() => setStateDrillLoading(false));
+  }, [mode, selectedKey]);
 
   const stateByBoundaryName = useMemo(() => {
     if (!boundaryGeoJson) return new Map<string, IndiaMapState>();
@@ -205,7 +240,12 @@ export function IndiaMapPage() {
                 click: (params: MapClickEvent) => {
                   if (typeof params.name !== 'string') return;
                   const state = stateByBoundaryName.get(params.name);
-                  if (state) setSelectedKey(state.state_key);
+                  if (state) {
+                    setSelectedKey(state.state_key);
+                    setMode('state');
+                    setStateDrillLoading(true);
+                    setStateDrillError(null);
+                  }
                 },
               }}
             />
@@ -216,27 +256,96 @@ export function IndiaMapPage() {
           {selected && (
             <Card>
               <CardHeader>
-                <CardTitle>{selected.state_name}</CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Top district: {selected.top_district_name} ({selected.top_district_score})
-                </p>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle>{selected.state_name}</CardTitle>
+                    <p className="text-sm text-muted-foreground">
+                      Top district: {selected.top_district_name} ({selected.top_district_score})
+                    </p>
+                  </div>
+                  {mode === 'state' && (
+                    <Button variant="outline" size="sm" onClick={() => setMode('india')}>
+                      <ArrowLeft className="mr-2 h-4 w-4" /> India
+                    </Button>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border bg-muted/25 p-3">
-                  <p className="text-xs text-muted-foreground">Max desert signal</p>
-                  <p className="mt-1 text-2xl font-semibold">{selected.max_trust_adjusted_score}</p>
-                </div>
-                <div className="rounded-xl border bg-muted/25 p-3">
-                  <p className="text-xs text-muted-foreground">Evidence confidence</p>
-                  <p className="mt-1 text-2xl font-semibold">{selected.avg_evidence_confidence}</p>
-                </div>
+                {mode === 'state' && stateCoverage ? (
+                  <>
+                    <div className="rounded-xl border bg-muted/25 p-3">
+                      <p className="text-xs text-muted-foreground">Base desert proxy</p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {stateCoverage.totals.total_area_hexes
+                          ? Math.round(
+                              (stateCoverage.totals.desert_area_hexes_base /
+                                stateCoverage.totals.total_area_hexes) *
+                                100
+                            )
+                          : 0}
+                        %
+                      </p>
+                    </div>
+                    <div className="rounded-xl border bg-muted/25 p-3">
+                      <p className="text-xs text-muted-foreground">Trust-adjusted proxy</p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {stateCoverage.totals.total_area_hexes
+                          ? Math.round(
+                              (stateCoverage.totals.desert_area_hexes_trust_adjusted /
+                                stateCoverage.totals.total_area_hexes) *
+                                100
+                            )
+                          : 0}
+                        %
+                      </p>
+                    </div>
+                    <div className="sm:col-span-2 rounded-xl border bg-muted/25 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Trust adjustment</p>
+                          <p className="text-xs leading-5 text-muted-foreground">
+                            Switches the drill-down list from base desert score to trust-adjusted score.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setTrustAdjusted((value) => !value)}
+                          className={`h-7 w-12 rounded-full p-1 transition-colors ${
+                            trustAdjusted ? 'bg-primary' : 'bg-muted'
+                          }`}
+                          aria-pressed={trustAdjusted}
+                          aria-label="Toggle trust adjustment"
+                        >
+                          <span
+                            className={`block h-5 w-5 rounded-full bg-background transition-transform ${
+                              trustAdjusted ? 'translate-x-5' : ''
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="rounded-xl border bg-muted/25 p-3">
+                      <p className="text-xs text-muted-foreground">Max desert signal</p>
+                      <p className="mt-1 text-2xl font-semibold">{selected.max_trust_adjusted_score}</p>
+                    </div>
+                    <div className="rounded-xl border bg-muted/25 p-3">
+                      <p className="text-xs text-muted-foreground">Evidence confidence</p>
+                      <p className="mt-1 text-2xl font-semibold">{selected.avg_evidence_confidence}</p>
+                    </div>
+                  </>
+                )}
                 <div className="rounded-xl border bg-muted/25 p-3">
                   <p className="text-xs text-muted-foreground">Districts scored</p>
                   <p className="mt-1 text-2xl font-semibold">{selected.district_count}</p>
                 </div>
                 <div className="rounded-xl border bg-muted/25 p-3">
                   <p className="text-xs text-muted-foreground">Facilities found</p>
-                  <p className="mt-1 text-2xl font-semibold">{selected.facility_count}</p>
+                  <p className="mt-1 text-2xl font-semibold">
+                    {mode === 'state' ? stateFacilities.length.toLocaleString() : selected.facility_count}
+                  </p>
                 </div>
                 <div className="sm:col-span-2">
                   <Badge variant={actionVariant(selected.top_district_action)}>
@@ -246,6 +355,49 @@ export function IndiaMapPage() {
                     Recommended action for the top district by current rule-based classifier.
                   </p>
                 </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {mode === 'state' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>District drill-down</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Ranked by {trustAdjusted ? 'trust-adjusted score' : 'base desert score'} for the selected state.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {stateDrillLoading && <Skeleton className="h-28 rounded-xl" />}
+                {stateDrillError && <p className="text-sm text-destructive">{stateDrillError}</p>}
+                {[...stateDistricts]
+                  .sort((a, b) =>
+                    trustAdjusted
+                      ? b.trust_adjusted_score - a.trust_adjusted_score
+                      : b.desert_score - a.desert_score
+                  )
+                  .slice(0, 8)
+                  .map((district) => (
+                    <div key={district.district_key} className="rounded-xl border p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-medium text-foreground">{district.district_name}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {district.desert_area_pct ?? district.facility_scarcity_score}% base desert proxy ·{' '}
+                            {district.desert_area_pct_trust_adjusted ?? district.facility_scarcity_score}% trust-adjusted
+                          </p>
+                        </div>
+                        <Badge variant={actionVariant(district.recommended_action)}>
+                          {actionLabels[district.recommended_action]}
+                        </Badge>
+                      </div>
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                        <span>Need {district.health_need_score}</span>
+                        <span>Scarcity {district.facility_scarcity_score}</span>
+                        <span>Confidence {district.evidence_trust_score}</span>
+                      </div>
+                    </div>
+                  ))}
               </CardContent>
             </Card>
           )}
@@ -260,7 +412,13 @@ export function IndiaMapPage() {
                 <button
                   key={state.state_key}
                   type="button"
-                  onClick={() => setSelectedKey(state.state_key)}
+                  onClick={() => {
+                    setSelectedKey(state.state_key);
+                    if (mode === 'state') {
+                      setStateDrillLoading(true);
+                      setStateDrillError(null);
+                    }
+                  }}
                   className={`w-full rounded-xl border p-3 text-left transition-colors ${
                     selectedKey === state.state_key ? 'border-primary bg-primary/5' : 'hover:bg-muted/40'
                   }`}
