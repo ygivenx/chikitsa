@@ -42,4 +42,4 @@ targets:
       postgres_branch: projects/chikitsa-copilot/branches/production
       postgres_database: projects/chikitsa-copilot/branches/production/databases/databricks-postgres
       postgres_project: projects/chikitsa-copilot
-      serving_endpoint_name: databricks-gpt-oss-120b
+      serving_endpoint_name: chatgpt

@@ -1,27 +1,62 @@
-import { useEffect, useState } from 'react';
-import { Badge, Card, CardContent, CardHeader, CardTitle, Input, Skeleton } from '@databricks/appkit-ui/react';
+import { useEffect, useMemo, useState } from 'react';
+import { Badge, Card, CardContent, CardHeader, CardTitle, Skeleton } from '@databricks/appkit-ui/react';
+import { SearchableSelect } from '../components/SearchableSelect';
 import { fetchJson } from '../lib/api';
 import { actionLabels, actionVariant } from '../lib/chikitsa-copy';
-import type { DistrictPriority } from '../lib/chikitsa-types';
+import type { DistrictPriority, LocationOptions } from '../lib/chikitsa-types';
 
 export function ExplorePage() {
   const [districts, setDistricts] = useState<DistrictPriority[]>([]);
   const [state, setState] = useState('bihar');
+  const [district, setDistrict] = useState('');
+  const [locations, setLocations] = useState<LocationOptions | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (state) params.set('state', state);
+    void fetchJson<LocationOptions>(`/api/location-options?${params.toString()}`)
+      .then(setLocations)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Failed to load filters.'));
+  }, [state]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setLoading(true);
       setError(null);
-      const params = new URLSearchParams({ state, limit: '40' });
+      const params = new URLSearchParams({ limit: district ? '1' : '200' });
+      if (state) params.set('state', state);
+      if (district) params.set('district', district);
       void fetchJson<DistrictPriority[]>(`/api/districts?${params.toString()}`)
         .then(setDistricts)
         .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Failed to load districts.'))
         .finally(() => setLoading(false));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [state]);
+  }, [district, state]);
+
+  const stateOptions = useMemo(
+    () =>
+      locations?.states.map((option) => ({
+        value: option.state_key,
+        label: option.state_name,
+        description: `${option.district_count} districts`,
+      })) ?? [],
+    [locations]
+  );
+
+  const districtOptions = useMemo(
+    () => [
+      { value: '', label: 'All districts', description: 'Within selected state' },
+      ...(locations?.districts.map((option) => ({
+        value: option.district_key,
+        label: option.district_name,
+        description: option.state_name,
+      })) ?? []),
+    ],
+    [locations]
+  );
 
   return (
     <div className="space-y-6">
@@ -37,10 +72,26 @@ export function ExplorePage() {
         </div>
         <Card>
           <CardContent className="space-y-3 p-4">
-            <label className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground" htmlFor="state">
-              State filter
-            </label>
-            <Input id="state" value={state} onChange={(event) => setState(event.target.value)} />
+            <SearchableSelect
+              id="explore-state"
+              label="State filter"
+              value={state}
+              options={stateOptions}
+              onChange={(nextState) => {
+                setState(nextState);
+                setDistrict('');
+              }}
+              placeholder="Type a state"
+            />
+            <SearchableSelect
+              id="explore-district"
+              label="District filter"
+              value={district}
+              options={districtOptions}
+              onChange={setDistrict}
+              placeholder="Type a district"
+              disabled={!locations}
+            />
             {error && <p className="text-sm text-destructive">{error}</p>}
           </CardContent>
         </Card>

@@ -151,10 +151,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function extractModelContent(response: unknown): string {
-  if (!isRecord(response)) return 'No model response was returned.';
-  const payload = isRecord(response.data) ? response.data : response;
+  const payload = findPayloadWithChoices(response);
+  if (!payload) return isRecord(response) ? JSON.stringify(response) : 'No model response was returned.';
   const choices = payload.choices;
-  if (!Array.isArray(choices) || choices.length === 0) return JSON.stringify(response);
+  if (choices.length === 0) return JSON.stringify(response);
   const firstChoice: unknown = choices[0];
   if (!isRecord(firstChoice)) return JSON.stringify(response);
   const message = firstChoice.message;
@@ -163,8 +163,8 @@ function extractModelContent(response: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     const text = content
-      .filter((block): block is Record<string, unknown> => isRecord(block) && block.type === 'text')
-      .map((block) => block.text)
+      .filter((block): block is Record<string, unknown> => isRecord(block))
+      .flatMap((block) => [block.text, block.content, block.output_text])
       .filter((value): value is string => typeof value === 'string')
       .join('\n\n');
     if (text) return text;
@@ -175,6 +175,18 @@ function extractModelContent(response: unknown): string {
 function parseLimit(value: unknown, fallback: number, maximum: number) {
   const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number.NaN;
   return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), maximum) : fallback;
+}
+
+function findPayloadWithChoices(value: unknown, depth = 0): (Record<string, unknown> & { choices: unknown[] }) | null {
+  if (!isRecord(value) || depth > 6) return null;
+  if (Array.isArray(value.choices)) return { ...value, choices: value.choices };
+
+  for (const child of Object.values(value)) {
+    const match = findPayloadWithChoices(child, depth + 1);
+    if (match) return match;
+  }
+
+  return null;
 }
 
 export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
@@ -241,18 +253,51 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
     app.get('/api/districts', async (req, res) => {
       const limit = parseLimit(req.query.limit, 50, 200);
       const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+      const district = typeof req.query.district === 'string' ? req.query.district.trim().toLowerCase() : '';
       try {
         const result = await appkit.lakebase.query(
           `${DISTRICT_RANKING_SQL}
            WHERE ($1 = '' OR state_key = $1)
+             AND ($2 = '' OR district_key = $2)
            ORDER BY trust_adjusted_score DESC, desert_score DESC
-           LIMIT $2`,
-          [state, limit]
+           LIMIT $3`,
+          [state, district, limit]
         );
         res.json(result.rows);
       } catch (error) {
         console.error('[chikitsa] Failed to list districts:', error);
         res.status(500).json({ error: 'Failed to load district priorities.' });
+      }
+    });
+
+    app.get('/api/location-options', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+      try {
+        const [states, districts] = await Promise.all([
+          appkit.lakebase.query(`
+            SELECT state_name, state_key, COUNT(*)::INT AS district_count
+            FROM public.district_health_profiles
+            GROUP BY state_name, state_key
+            ORDER BY state_name
+          `),
+          appkit.lakebase.query(
+            `
+              SELECT state_name, state_key, district_name, district_key
+              FROM public.district_health_profiles
+              WHERE ($1 = '' OR state_key = $1)
+              ORDER BY state_name, district_name
+            `,
+            [state]
+          ),
+        ]);
+
+        res.json({
+          states: states.rows,
+          districts: districts.rows,
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load location options:', error);
+        res.status(500).json({ error: 'Failed to load location filters.' });
       }
     });
 
@@ -557,6 +602,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
         const prompt = [
           'You are an evidence-aware public-health planning copilot for India.',
           'Answer the planning question using only the supplied evidence.',
+          'Return only the final answer. Do not include a thinking process, scratchpad, or self-review.',
           'Separate observed facts from inferences. Never present facility counts as complete coverage.',
           'The districts array is the authoritative ranked district evidence for the requested scope.',
           'The facilitySummaryByDistrict array contains aggregate facility evidence for the requested scope.',
@@ -575,8 +621,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           .asUser(req)
           .invoke({
             messages: [{ role: 'user', content: prompt }],
-            max_tokens: 1800,
-            reasoning_effort: 'medium',
+            max_tokens: 3000,
+            reasoning_effort: 'low',
             temperature: 0.2,
           });
 
@@ -584,7 +630,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           answer: extractModelContent(modelResponse),
           evidence,
           trust: {
-            model: 'databricks-gpt-oss-120b',
+            model: 'chatgpt',
             modelExecution: 'Authenticated user (OBO)',
             dataExecution: 'App service principal',
             retrieval: 'Deterministic server-side SQL; the model does not generate or execute SQL',

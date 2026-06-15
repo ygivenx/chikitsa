@@ -67,6 +67,20 @@ export interface IndiaMapOverview {
   assignmentMethod: string;
 }
 
+export interface LocationOptions {
+  states: Array<{
+    state_name: string;
+    state_key: string;
+    district_count: number;
+  }>;
+  districts: Array<{
+    state_name: string;
+    state_key: string;
+    district_name: string;
+    district_key: string;
+  }>;
+}
+
 export interface Facility {
   facility_id: string;
   name: string;

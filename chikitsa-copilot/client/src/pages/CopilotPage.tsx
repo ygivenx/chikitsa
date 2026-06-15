@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -6,15 +6,15 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
-  Input,
   Skeleton,
   Textarea,
 } from '@databricks/appkit-ui/react';
 import DOMPurify from 'dompurify';
 import { Bot, Send } from 'lucide-react';
 import { marked } from 'marked';
+import { SearchableSelect } from '../components/SearchableSelect';
 import { fetchJson } from '../lib/api';
-import type { CopilotResponse } from '../lib/chikitsa-types';
+import type { CopilotResponse, LocationOptions } from '../lib/chikitsa-types';
 
 const exampleQuestions = [
   'What intervention should the government investigate first in Bihar?',
@@ -24,7 +24,9 @@ const exampleQuestions = [
 
 export function CopilotPage() {
   const [question, setQuestion] = useState(exampleQuestions[0]);
+  const [state, setState] = useState('bihar');
   const [district, setDistrict] = useState('');
+  const [locations, setLocations] = useState<LocationOptions | null>(null);
   const [result, setResult] = useState<CopilotResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +40,36 @@ export function CopilotPage() {
     return DOMPurify.sanitize(html);
   }, [result]);
 
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (state) params.set('state', state);
+    void fetchJson<LocationOptions>(`/api/location-options?${params.toString()}`)
+      .then(setLocations)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Failed to load filters.'));
+  }, [state]);
+
+  const stateOptions = useMemo(
+    () =>
+      locations?.states.map((option) => ({
+        value: option.state_key,
+        label: option.state_name,
+        description: `${option.district_count} districts`,
+      })) ?? [],
+    [locations]
+  );
+
+  const districtOptions = useMemo(
+    () => [
+      { value: '', label: 'All districts', description: 'Within selected state' },
+      ...(locations?.districts.map((option) => ({
+        value: option.district_key,
+        label: option.district_name,
+        description: option.state_name,
+      })) ?? []),
+    ],
+    [locations]
+  );
+
   async function analyze(event: React.FormEvent) {
     event.preventDefault();
     setLoading(true);
@@ -47,7 +79,7 @@ export function CopilotPage() {
         await fetchJson<CopilotResponse>('/api/copilot/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, state: 'bihar', district: district || undefined }),
+          body: JSON.stringify({ question, state: state || undefined, district: district || undefined }),
         })
       );
     } catch (reason) {
@@ -92,10 +124,25 @@ export function CopilotPage() {
                 required
                 minLength={8}
               />
-              <Input
+              <SearchableSelect
+                id="copilot-state"
+                label="State focus"
+                value={state}
+                options={stateOptions}
+                onChange={(nextState) => {
+                  setState(nextState);
+                  setDistrict('');
+                }}
+                placeholder="Type a state"
+              />
+              <SearchableSelect
+                id="copilot-district"
+                label="District focus"
                 value={district}
-                onChange={(event) => setDistrict(event.target.value)}
-                placeholder="Optional district focus, e.g. Purnia"
+                options={districtOptions}
+                onChange={setDistrict}
+                placeholder="Optional district focus"
+                disabled={!locations}
               />
               <div className="space-y-2">
                 <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Use one prompt</p>
