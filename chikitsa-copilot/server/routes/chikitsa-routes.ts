@@ -223,7 +223,6 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           `),
           appkit.lakebase.query(
             `${DISTRICT_RANKING_SQL}
-             WHERE state_key = 'bihar'
              ORDER BY trust_adjusted_score DESC, desert_score DESC
              LIMIT 10`
           ),
@@ -231,8 +230,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             SELECT facility_id, name, city, state_or_region, pincode, coordinate_quality,
               reported_capacity, capacity_outlier_flag, completeness_score
             FROM public.facilities_curated
-            WHERE state_key = 'bihar'
-              AND (coordinate_quality <> 'plausible_india' OR capacity_outlier_flag)
+            WHERE coordinate_quality <> 'plausible_india' OR capacity_outlier_flag
             ORDER BY capacity_outlier_flag DESC, completeness_score ASC, name
             LIMIT 8
           `),

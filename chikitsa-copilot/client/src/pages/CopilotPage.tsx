@@ -19,15 +19,15 @@ import { fetchJson } from '../lib/api';
 import type { CopilotResponse, LocationOptions } from '../lib/chikitsa-types';
 
 const exampleQuestions = [
-  'What intervention should the government investigate first in Bihar?',
-  'For Purnia, explain the evidence, uncertainty, and recommended next action.',
-  'Which Bihar districts look like data deserts rather than healthcare deserts?',
+  'What intervention should the government investigate first across the current evidence?',
+  'For the selected district, explain the evidence, uncertainty, and recommended next action.',
+  'Which districts look like data deserts rather than healthcare deserts?',
 ];
 
 export function CopilotPage() {
   const [searchParams] = useSearchParams();
   const [question, setQuestion] = useState(searchParams.get('q') || exampleQuestions[0]);
-  const [state, setState] = useState(searchParams.get('state') || 'bihar');
+  const [state, setState] = useState(searchParams.get('state') || '');
   const [district, setDistrict] = useState(searchParams.get('district') || '');
   const [locations, setLocations] = useState<LocationOptions | null>(null);
   const [result, setResult] = useState<CopilotResponse | null>(null);
@@ -52,26 +52,30 @@ export function CopilotPage() {
   }, [state]);
 
   const stateOptions = useMemo(
-    () =>
-      locations?.states.map((option) => ({
+    () => [
+      { value: '', label: 'All states', description: 'National scope' },
+      ...(locations?.states.map((option) => ({
         value: option.state_key,
         label: option.state_name,
         description: `${option.district_count} districts`,
-      })) ?? [],
+      })) ?? []),
+    ],
     [locations]
   );
 
   const districtOptions = useMemo(
     () => [
-      { value: '', label: 'All districts', description: 'Within selected state' },
+      { value: '', label: 'All districts', description: state ? 'Within selected state' : 'Select a state first' },
       ...(locations?.districts.map((option) => ({
         value: option.district_key,
         label: option.district_name,
         description: option.state_name,
       })) ?? []),
     ],
-    [locations]
+    [locations, state]
   );
+
+  const selectedStateName = stateOptions.find((option) => option.value === state)?.label;
 
   async function analyze(event: React.FormEvent) {
     event.preventDefault();
@@ -96,7 +100,7 @@ export function CopilotPage() {
     <div className="space-y-6">
       <div>
         <Badge variant="outline">
-          <Bot className="mr-1 h-3.5 w-3.5" /> Bihar copilot
+          <Bot className="mr-1 h-3.5 w-3.5" /> Planning copilot
         </Badge>
         <h2 className="mt-3 text-3xl font-semibold tracking-tight text-foreground">
           Ask the one question the demo is built around
@@ -145,8 +149,8 @@ export function CopilotPage() {
                   value={district}
                   options={districtOptions}
                   onChange={setDistrict}
-                  placeholder="Optional district focus"
-                  disabled={!locations}
+                  placeholder={state ? 'Optional district focus' : 'Select a state first'}
+                  disabled={!locations || !state}
                 />
                 <div className="space-y-2">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Use one prompt</p>
@@ -169,7 +173,7 @@ export function CopilotPage() {
             </CardContent>
           </Card>
 
-          <DistrictStateMap stateKey={state} districtKey={district} />
+          <DistrictStateMap stateKey={state} stateName={selectedStateName} districtKey={district} />
         </div>
 
         <Card className="min-h-[520px]">

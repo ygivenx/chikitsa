@@ -28,6 +28,7 @@ export function PlansPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
+    state: '',
     district: '',
     action_type: 'investigate' as Intervention['action_type'],
     owner: '',
@@ -56,12 +57,12 @@ export function PlansPage() {
         body: JSON.stringify({
           ...form,
           title: `${actionLabel} investigation: ${form.district}`,
-          state: 'Bihar',
           priority,
         }),
       });
       setPlans((current) => [created, ...current]);
       setForm({
+        state: '',
         district: '',
         action_type: 'investigate',
         owner: '',
@@ -97,8 +98,8 @@ export function PlansPage() {
         <Badge variant="outline">Follow-up queue</Badge>
         <h2 className="mt-3 text-3xl font-semibold tracking-tight text-foreground">Turn the shortlist into action</h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Keep the workflow small: pick a Bihar district, choose the action class, assign an owner, and capture the next
-          verification step.
+          Keep the workflow small: pick a state and district, choose the action class, assign an owner, and capture the
+          next verification step.
         </p>
       </div>
 
@@ -116,7 +117,13 @@ export function PlansPage() {
             >
               <Input
                 required
-                placeholder="District, e.g. Purnia"
+                placeholder="State"
+                value={form.state}
+                onChange={(event) => setForm({ ...form, state: event.target.value })}
+              />
+              <Input
+                required
+                placeholder="District"
                 value={form.district}
                 onChange={(event) => setForm({ ...form, district: event.target.value })}
               />

@@ -7,7 +7,7 @@ import type { DistrictPriority, LocationOptions } from '../lib/chikitsa-types';
 
 export function ExplorePage() {
   const [districts, setDistricts] = useState<DistrictPriority[]>([]);
-  const [state, setState] = useState('bihar');
+  const [state, setState] = useState('');
   const [district, setDistrict] = useState('');
   const [locations, setLocations] = useState<LocationOptions | null>(null);
   const [loading, setLoading] = useState(true);
@@ -37,25 +37,27 @@ export function ExplorePage() {
   }, [district, state]);
 
   const stateOptions = useMemo(
-    () =>
-      locations?.states.map((option) => ({
+    () => [
+      { value: '', label: 'All states', description: 'National scope' },
+      ...(locations?.states.map((option) => ({
         value: option.state_key,
         label: option.state_name,
         description: `${option.district_count} districts`,
-      })) ?? [],
+      })) ?? []),
+    ],
     [locations]
   );
 
   const districtOptions = useMemo(
     () => [
-      { value: '', label: 'All districts', description: 'Within selected state' },
+      { value: '', label: 'All districts', description: state ? 'Within selected state' : 'Select a state first' },
       ...(locations?.districts.map((option) => ({
         value: option.district_key,
         label: option.district_name,
         description: option.state_name,
       })) ?? []),
     ],
-    [locations]
+    [locations, state]
   );
 
   return (
@@ -67,7 +69,7 @@ export function ExplorePage() {
             Why a district is a healthcare desert or a data desert
           </h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-            This page exists only to explain the shortlist. Keep the filter on Bihar for the demo.
+            Use the filters to review the national ranking or focus one state before selecting a district.
           </p>
         </div>
         <Card>
@@ -89,8 +91,8 @@ export function ExplorePage() {
               value={district}
               options={districtOptions}
               onChange={setDistrict}
-              placeholder="Type a district"
-              disabled={!locations}
+              placeholder={state ? 'Type a district' : 'Select a state first'}
+              disabled={!locations || !state}
             />
             {error && <p className="text-sm text-destructive">{error}</p>}
           </CardContent>

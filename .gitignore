@@ -3,3 +3,4 @@
 .cursor/
 .databricks/
 .mcp.json
+.env

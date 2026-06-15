@@ -6,13 +6,15 @@ import { fetchJson } from '../lib/api';
 import { actionLabels } from '../lib/chikitsa-copy';
 import type { DistrictPriority } from '../lib/chikitsa-types';
 
-interface BiharAdm2GeoJson {
+interface DistrictBoundaryGeoJson {
   type: 'FeatureCollection';
   features: Array<{
     type: 'Feature';
     properties: {
       districtName: string;
       districtKey: string;
+      stateName?: string;
+      stateKey?: string;
     };
     geometry: unknown;
   }>;
@@ -20,30 +22,69 @@ interface BiharAdm2GeoJson {
 
 interface DistrictStateMapProps {
   stateKey: string;
+  stateName?: string;
   districtKey: string;
 }
 
-export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProps) {
-  const [boundaryGeoJson, setBoundaryGeoJson] = useState<BiharAdm2GeoJson | null>(null);
-  const [districts, setDistricts] = useState<DistrictPriority[]>([]);
-  const [error, setError] = useState<string | null>(null);
+interface StateBoundaryAsset {
+  mapName: string;
+  url: string;
+}
+
+interface LoadedBoundaryState {
+  stateKey: string;
+  boundaryGeoJson: DistrictBoundaryGeoJson;
+  districts: DistrictPriority[];
+}
+
+function stateBoundaryFileName(stateKey: string) {
+  return stateKey.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+export function DistrictStateMap({ stateKey, stateName, districtKey }: DistrictStateMapProps) {
+  const [loadedBoundary, setLoadedBoundary] = useState<LoadedBoundaryState | null>(null);
+  const [loadError, setLoadError] = useState<{ stateKey: string; message: string } | null>(null);
+  const boundaryAsset = useMemo<StateBoundaryAsset | null>(() => {
+    if (!stateKey) return null;
+    const fileName = stateBoundaryFileName(stateKey);
+    return {
+      mapName: `state-districts-${fileName}`,
+      url: `/state-district-boundaries/${fileName}.json`,
+    };
+  }, [stateKey]);
+  const selectedStateLabel = stateName || 'selected state';
+  const currentBoundary = loadedBoundary?.stateKey === stateKey ? loadedBoundary.boundaryGeoJson : null;
+  const districts = useMemo(
+    () => (loadedBoundary?.stateKey === stateKey ? loadedBoundary.districts : []),
+    [loadedBoundary, stateKey]
+  );
+  const error = loadError?.stateKey === stateKey ? loadError.message : null;
 
   useEffect(() => {
-    if (stateKey !== 'bihar') return;
+    if (!boundaryAsset) return;
+    let cancelled = false;
 
     void Promise.all([
-      fetchJson<BiharAdm2GeoJson>('/bihar-adm2.json'),
-      fetchJson<DistrictPriority[]>('/api/districts?state=bihar&limit=200'),
+      fetchJson<DistrictBoundaryGeoJson>(boundaryAsset.url),
+      fetchJson<DistrictPriority[]>(`/api/districts?state=${encodeURIComponent(stateKey)}&limit=200`),
     ])
       .then(([boundary, rows]) => {
-        echarts.registerMap('bihar-adm2', boundary as unknown as Parameters<typeof echarts.registerMap>[1]);
-        setBoundaryGeoJson(boundary);
-        setDistricts(rows);
+        if (cancelled) return;
+        echarts.registerMap(boundaryAsset.mapName, boundary as unknown as Parameters<typeof echarts.registerMap>[1]);
+        setLoadedBoundary({ stateKey, boundaryGeoJson: boundary, districts: rows });
       })
       .catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : 'Failed to load district map.');
+        if (cancelled) return;
+        setLoadError({
+          stateKey,
+          message: reason instanceof Error ? reason.message : 'Failed to load district map.',
+        });
       });
-  }, [stateKey]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [boundaryAsset, stateKey]);
 
   const districtByKey = useMemo(
     () => new Map(districts.map((district) => [district.district_key, district])),
@@ -53,7 +94,7 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
   const selectedDistrict = districtKey ? districtByKey.get(districtKey) : null;
 
   const chartOption = useMemo(() => {
-    if (!boundaryGeoJson) return {};
+    if (!currentBoundary || !boundaryAsset) return {};
 
     return {
       tooltip: {
@@ -82,7 +123,7 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
         {
           name: 'District desert signal',
           type: 'map',
-          map: 'bihar-adm2',
+          map: boundaryAsset.mapName,
           nameProperty: 'districtKey',
           roam: true,
           selectedMode: false,
@@ -106,7 +147,7 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
             borderWidth: 0.75,
             areaColor: '#f4efe4',
           },
-          data: boundaryGeoJson.features.map((feature) => {
+          data: currentBoundary.features.map((feature) => {
             const district = districtByKey.get(feature.properties.districtKey);
             const isSelected = districtKey && feature.properties.districtKey === districtKey;
             return {
@@ -124,9 +165,9 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
         },
       ],
     };
-  }, [boundaryGeoJson, districtByKey, districtKey]);
+  }, [boundaryAsset, currentBoundary, districtByKey, districtKey]);
 
-  if (stateKey !== 'bihar') {
+  if (!stateKey) {
     return (
       <Card>
         <CardHeader>
@@ -134,7 +175,23 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
         </CardHeader>
         <CardContent>
           <p className="text-sm leading-6 text-muted-foreground">
-            District boundary preview is currently wired for the Bihar demo state.
+            Choose a state to preview district boundaries and highlight a selected district.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!boundaryAsset) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>District within {selectedStateLabel}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm leading-6 text-muted-foreground">
+            District boundary preview is not available for this state yet. Scores and recommendations still use the
+            selected state and district filters.
           </p>
         </CardContent>
       </Card>
@@ -145,7 +202,7 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
     return (
       <Card>
         <CardHeader>
-          <CardTitle>District within Bihar</CardTitle>
+          <CardTitle>District within {selectedStateLabel}</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-destructive">{error}</p>
@@ -154,11 +211,11 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
     );
   }
 
-  if (!boundaryGeoJson || districts.length === 0) {
+  if (!currentBoundary || districts.length === 0) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>District within Bihar</CardTitle>
+          <CardTitle>District within {selectedStateLabel}</CardTitle>
         </CardHeader>
         <CardContent>
           <Skeleton className="h-72 rounded-xl" />
@@ -172,7 +229,7 @@ export function DistrictStateMap({ stateKey, districtKey }: DistrictStateMapProp
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <CardTitle>District within Bihar</CardTitle>
+            <CardTitle>District within {selectedStateLabel}</CardTitle>
             <p className="mt-1 text-sm text-muted-foreground">
               {selectedDistrict
                 ? `${selectedDistrict.district_name} highlighted inside state boundaries.`
