@@ -109,14 +109,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function extractModelContent(response: unknown): string {
   if (!isRecord(response)) return 'No model response was returned.';
-  const choices = response.choices;
+  const payload = isRecord(response.data) ? response.data : response;
+  const choices = payload.choices;
   if (!Array.isArray(choices) || choices.length === 0) return JSON.stringify(response);
   const firstChoice: unknown = choices[0];
   if (!isRecord(firstChoice)) return JSON.stringify(response);
   const message = firstChoice.message;
   if (!isRecord(message)) return JSON.stringify(response);
   const content = message.content;
-  return typeof content === 'string' ? content : JSON.stringify(response);
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((block): block is Record<string, unknown> => isRecord(block) && block.type === 'text')
+      .map((block) => block.text)
+      .filter((value): value is string => typeof value === 'string')
+      .join('\n\n');
+    if (text) return text;
+  }
+  return JSON.stringify(response);
 }
 
 function parseLimit(value: unknown, fallback: number, maximum: number) {
