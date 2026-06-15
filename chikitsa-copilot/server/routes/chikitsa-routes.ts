@@ -593,9 +593,9 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
               districtKey || stateKey
                 ? 'complete for requested state or district, up to the configured safety limit'
                 : 'national ranking capped for prompt size',
-            facilitySummaryRowsReturned: facilitySummary.rows.length,
-            facilitySampleRowsReturned: facilitySamples.rows.length,
-            facilitySampleLimit,
+          facilitySummaryRowsReturned: facilitySummary.rows.length,
+            facilityExampleRowsReturned: facilitySamples.rows.length,
+            facilityExampleLimit: facilitySampleLimit,
           },
         };
 
@@ -603,11 +603,13 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'You are an evidence-aware public-health planning copilot for India.',
           'Answer the planning question using only the supplied evidence.',
           'Return only the final answer. Do not include a thinking process, scratchpad, or self-review.',
-          'Separate observed facts from inferences. Never present facility counts as complete coverage.',
+          'Separate observed facts from inferences. Describe facility counts as discovered facility snapshot evidence, not as a full registry.',
+          'Do not use the phrase "complete coverage" in the final answer.',
           'The districts array is the authoritative ranked district evidence for the requested scope.',
-          'The facilitySummaryByDistrict array contains aggregate facility evidence for the requested scope.',
-          'The facilitySamples array is only a bounded sample of records; never describe it as all facilities.',
-          'Use retrievalScope when describing how many rows were reviewed.',
+          'Use facilitySummaryByDistrict for facility count, coordinate quality, capacity flag, completeness, and ambiguous PIN evidence.',
+          'The facilitySamples array contains example facility records for QA only; do not summarize it as coverage.',
+          'Do not mention sample limits in the final answer unless a specific example record creates a data-quality caveat.',
+          'Use retrievalScope when describing district coverage or evidence reviewed.',
           'Call out ambiguous geography, suppressed values, caution estimates, coordinate flags, and implausible claims.',
           'Classify the recommended action as exactly one of: Build, Verify, Upgrade, Improve access, Investigate.',
           'Do not provide medical diagnosis or individual treatment advice.',

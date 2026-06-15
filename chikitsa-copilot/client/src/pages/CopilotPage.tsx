@@ -198,8 +198,11 @@ export function CopilotPage() {
                 <div className="rounded-xl border bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
                   <p>
                     <strong className="text-foreground">Grounding:</strong> {result.evidence.districts.length} district
-                    rows, {result.evidence.facilitySummaryByDistrict.length} facility-summary rows, and{' '}
-                    {result.evidence.facilitySamples.length} facility sample rows; {result.evidence.sourcePeriod}.
+                    rows and {result.evidence.facilitySummaryByDistrict.length} facility-summary rows;{' '}
+                    {result.evidence.sourcePeriod}.
+                  </p>
+                  <p className="mt-2">
+                    Facility record examples are used for QA only; the facility snapshot is not a registry.
                   </p>
                   <p className="mt-2">District coverage: {result.evidence.retrievalScope.districtCoverage}.</p>
                   <p className="mt-2">

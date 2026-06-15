@@ -128,8 +128,8 @@ export interface CopilotResponse {
       districtRowLimit: number;
       districtCoverage: string;
       facilitySummaryRowsReturned: number;
-      facilitySampleRowsReturned: number;
-      facilitySampleLimit: number;
+      facilityExampleRowsReturned: number;
+      facilityExampleLimit: number;
     };
   };
   trust: {
