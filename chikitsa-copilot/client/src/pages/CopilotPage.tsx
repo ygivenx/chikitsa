@@ -139,8 +139,10 @@ export function CopilotPage() {
                 <div className="rounded-xl border bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
                   <p>
                     <strong className="text-foreground">Grounding:</strong> {result.evidence.districts.length} district
-                    rows and {result.evidence.facilities.length} facility rows; {result.evidence.sourcePeriod}.
+                    rows, {result.evidence.facilitySummaryByDistrict.length} facility-summary rows, and{' '}
+                    {result.evidence.facilitySamples.length} facility sample rows; {result.evidence.sourcePeriod}.
                   </p>
+                  <p className="mt-2">District coverage: {result.evidence.retrievalScope.districtCoverage}.</p>
                   <p className="mt-2">
                     The model does not query directly. Treat the answer as planning support, then verify records before
                     operational use.

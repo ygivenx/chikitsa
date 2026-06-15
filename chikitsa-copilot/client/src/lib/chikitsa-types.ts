@@ -103,9 +103,20 @@ export interface CopilotResponse {
   answer: string;
   evidence: {
     districts: DistrictPriority[];
-    facilities: Array<Record<string, unknown>>;
+    facilitySummaryByDistrict: Array<Record<string, unknown>>;
+    facilitySamples: Array<Record<string, unknown>>;
     quality: Record<string, unknown>;
     sourcePeriod: string;
+    retrievalScope: {
+      state: string;
+      district: string;
+      districtRowsReturned: number;
+      districtRowLimit: number;
+      districtCoverage: string;
+      facilitySummaryRowsReturned: number;
+      facilitySampleRowsReturned: number;
+      facilitySampleLimit: number;
+    };
   };
   trust: {
     model: string;

@@ -449,54 +449,119 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       const { question, state = '', district = '' } = parsed.data;
       const stateKey = state.trim().toLowerCase();
       const districtKey = district.trim().toLowerCase();
+      const districtLimit = districtKey ? 1 : stateKey ? 100 : 200;
+      const facilitySampleLimit = districtKey ? 25 : 20;
 
       try {
-        const [districtEvidence, facilityEvidence, qualityEvidence] = await Promise.all([
+        const [districtEvidence, facilitySummary, facilitySamples, qualityEvidence] = await Promise.all([
           appkit.lakebase.query(
             `${DISTRICT_RANKING_SQL}
              WHERE ($1 = '' OR state_key = $1)
                AND ($2 = '' OR district_key = $2)
              ORDER BY trust_adjusted_score DESC, desert_score DESC
-             LIMIT 8`,
+             LIMIT $3`,
+            [stateKey, districtKey, districtLimit]
+          ),
+          appkit.lakebase.query(
+            `
+              SELECT
+                COALESCE(p.state_name, f.state_or_region, 'Unknown') AS state_name,
+                COALESCE(p.state_key, f.state_key, LOWER(TRIM(f.state_or_region)), 'unknown') AS state_key,
+                COALESCE(p.district_name, 'Unassigned or ambiguous PIN') AS district_name,
+                COALESCE(p.district_key, 'unassigned_or_ambiguous') AS district_key,
+                COUNT(DISTINCT f.facility_id)::INT AS facility_count,
+                SUM(CASE WHEN f.coordinate_quality <> 'plausible_india' THEN 1 ELSE 0 END)::INT
+                  AS coordinate_flag_count,
+                SUM(CASE WHEN f.capacity_outlier_flag THEN 1 ELSE 0 END)::INT AS capacity_outlier_count,
+                ROUND(AVG(f.completeness_score)::NUMERIC, 2)::DOUBLE PRECISION AS avg_completeness_score,
+                SUM(CASE WHEN p.is_unambiguous IS TRUE THEN 0 ELSE 1 END)::INT
+                  AS ambiguous_or_unassigned_pincode_count
+              FROM public.facilities_curated f
+              LEFT JOIN public.pincode_geography p
+                ON CASE WHEN f.pincode ~ '^[0-9]{6}$' THEN f.pincode::BIGINT END = p.pincode
+              WHERE ($1 = '' OR f.state_key = $1 OR p.state_key = $1)
+                AND ($2 = '' OR p.district_key = $2)
+              GROUP BY
+                COALESCE(p.state_name, f.state_or_region, 'Unknown'),
+                COALESCE(p.state_key, f.state_key, LOWER(TRIM(f.state_or_region)), 'unknown'),
+                COALESCE(p.district_name, 'Unassigned or ambiguous PIN'),
+                COALESCE(p.district_key, 'unassigned_or_ambiguous')
+              ORDER BY facility_count DESC, district_name
+            `,
             [stateKey, districtKey]
           ),
           appkit.lakebase.query(
             `
-              SELECT f.name, f.facility_type, f.city, f.state_or_region, f.pincode,
-                f.specialties, f.capabilities, f.coordinate_quality,
-                f.capacity_outlier_flag, p.district_name
+              SELECT
+                f.name,
+                f.facility_type,
+                f.city,
+                f.state_or_region,
+                f.pincode,
+                f.coordinate_quality,
+                f.capacity_outlier_flag,
+                f.completeness_score,
+                p.district_name,
+                p.is_unambiguous
               FROM public.facilities_curated f
               LEFT JOIN public.pincode_geography p
-                ON f.pincode ~ '^[0-9]+$' AND f.pincode::BIGINT = p.pincode
+                ON CASE WHEN f.pincode ~ '^[0-9]{6}$' THEN f.pincode::BIGINT END = p.pincode
               WHERE ($1 = '' OR f.state_key = $1)
                 AND ($2 = '' OR p.district_key = $2)
               ORDER BY f.completeness_score DESC
-              LIMIT 12
+              LIMIT $3
             `,
-            [stateKey, districtKey]
+            [stateKey, districtKey, facilitySampleLimit]
           ),
-          appkit.lakebase.query(`
+          appkit.lakebase.query(
+            `
             SELECT
               (SELECT COUNT(*)::INT FROM public.pincode_geography WHERE NOT is_unambiguous)
                 AS ambiguous_pincodes,
-              (SELECT COUNT(*)::INT FROM public.facilities_curated WHERE coordinate_quality <> 'plausible_india')
+              (SELECT COUNT(*)::INT
+               FROM public.facilities_curated
+               WHERE ($1 = '' OR state_key = $1)
+                 AND coordinate_quality <> 'plausible_india')
                 AS coordinate_flags,
-              (SELECT COUNT(*)::INT FROM public.facilities_curated WHERE capacity_outlier_flag)
+              (SELECT COUNT(*)::INT
+               FROM public.facilities_curated
+               WHERE ($1 = '' OR state_key = $1)
+                 AND capacity_outlier_flag)
                 AS capacity_flags
-          `),
+          `,
+            [stateKey]
+          ),
         ]);
 
         const evidence = {
           districts: districtEvidence.rows,
-          facilities: facilityEvidence.rows,
+          facilitySummaryByDistrict: facilitySummary.rows,
+          facilitySamples: facilitySamples.rows,
           quality: qualityEvidence.rows[0],
           sourcePeriod: 'NFHS-5 (2019-2021) and a marketplace facility snapshot',
+          retrievalScope: {
+            state: stateKey || 'all states',
+            district: districtKey || 'all districts in scope',
+            districtRowsReturned: districtEvidence.rows.length,
+            districtRowLimit: districtLimit,
+            districtCoverage:
+              districtKey || stateKey
+                ? 'complete for requested state or district, up to the configured safety limit'
+                : 'national ranking capped for prompt size',
+            facilitySummaryRowsReturned: facilitySummary.rows.length,
+            facilitySampleRowsReturned: facilitySamples.rows.length,
+            facilitySampleLimit,
+          },
         };
 
         const prompt = [
           'You are an evidence-aware public-health planning copilot for India.',
           'Answer the planning question using only the supplied evidence.',
           'Separate observed facts from inferences. Never present facility counts as complete coverage.',
+          'The districts array is the authoritative ranked district evidence for the requested scope.',
+          'The facilitySummaryByDistrict array contains aggregate facility evidence for the requested scope.',
+          'The facilitySamples array is only a bounded sample of records; never describe it as all facilities.',
+          'Use retrievalScope when describing how many rows were reviewed.',
           'Call out ambiguous geography, suppressed values, caution estimates, coordinate flags, and implausible claims.',
           'Classify the recommended action as exactly one of: Build, Verify, Upgrade, Improve access, Investigate.',
           'Do not provide medical diagnosis or individual treatment advice.',
@@ -510,7 +575,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           .asUser(req)
           .invoke({
             messages: [{ role: 'user', content: prompt }],
-            max_tokens: 1200,
+            max_tokens: 1800,
             reasoning_effort: 'medium',
             temperature: 0.2,
           });
