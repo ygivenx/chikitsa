@@ -1,100 +1,147 @@
-# Chikitsa Hackathon Submission
+# Chikitsa
+
+**Finding real medical deserts before public money moves.**
+
+_A Databricks-powered public-health planning app for evidence-aware government investment._
+
+**Live demo:** [Chikitsa Databricks App](https://chikitsa-copilot-7474650186235074.aws.databricksapps.com)
+
+Chikitsa helps government administrators move from an India-wide map to a district-level investment decision: **Build, Verify, Upgrade, Improve access, or Investigate**.
+
+The core idea is simple: a district with few visible healthcare facilities may be truly underserved, or the data may be incomplete. Those two cases require different government actions. **Chikitsa makes that uncertainty visible.**
 
 ## Inspiration
 
-Healthcare planning often starts with a simple question: where are facilities missing? But for a government administrator, that question is not enough. A district with few visible facilities can mean two very different things: a real medical desert, or a data gap where facility records are incomplete, stale, or unreliable.
+Healthcare planning often starts with one question:
 
-Chikitsa was inspired by that investment problem. Public health teams have limited budget. They need to know where to build, where to upgrade services, where to improve access, and where to verify the data before committing money.
+**Where are facilities missing?**
 
-In India, national and state programmes set the policy and funding frame, but district-level planning and accountability are where evidence becomes operational. Chikitsa helps a national or state planner scan districts, find standout possible medical deserts, and decide what government action is defensible.
+For a government administrator, that is not enough. A district with few visible facilities can mean:
 
-The same pattern resonates outside India. A governor like Kathy Hochul should be able to understand why local leaders, including mayors like Zohran Mamdani, are asking for health funding: what does the local evidence show, what is missing, and what action should government investigate first?
+- A **real medical desert**, where people likely lack access to care
+- A **data gap**, where facility records are incomplete, stale, or unreliable
 
-## What it does
+If those two cases are confused, governments can misallocate scarce budget. They may build in the wrong place, miss a district that needs urgent investment, or spend months debating records that were never reliable enough to support a decision.
 
-Chikitsa is a public-health planning app for finding likely real medical deserts across India.
+**Chikitsa was built for that decision point.**
 
-A government administrator can:
+In India, national and state programmes set the policy and funding frame, but district-level planning and accountability are where evidence becomes operational. Chikitsa gives national and state planners a way to scan districts, find standout possible medical deserts, and decide what action is defensible before committing resources.
+
+The pattern is globally relevant. A governor like Kathy Hochul should be able to understand why local leaders, including mayors like Zohran Mamdani, are asking for health funding. The decision should come down to evidence: **what does the local data show, what is missing, and what should government investigate first?**
+
+## What It Does
+
+Chikitsa turns fragmented health facility and population evidence into an explainable government planning workflow.
+
+A planner can:
 
 - Open an India-wide district map
 - Focus on a state
-- Inspect raw facility pins over district boundaries
-- Filter by ownership, facility type, and service evidence
-- Turn on the Real deserts layer to see apparent shortage
+- Inspect discovered facility GPS pins over district boundaries
+- Filter facilities by ownership, facility type, and service evidence
+- Toggle **Real deserts** to see apparent shortage
 - Select a standout district
-- Use the district copilot agent to dig into the records
+- Ask the district copilot agent to investigate the evidence
 - Save confirmed evidence and the reviewed district state
 
-The key output is not a generic score. It is an explainable action class:
+The main output is not a black-box score. It is an action class a planner can defend:
 
-- **Build:** high need, high scarcity, and enough Evidence Confidence to act
-- **Verify:** apparent shortage, but facility evidence is too weak for immediate investment
-- **Upgrade:** facilities exist, but services do not match local need
-- **Improve access:** facilities exist, but geography or access remains weak
-- **Investigate:** mixed signal that needs administrative review
+- **Build** when need is high, scarcity is high, and Evidence Confidence is strong
+- **Verify** when apparent shortage is high but the facility evidence is too weak for immediate investment
+- **Upgrade** when facilities exist but services do not match local need
+- **Improve access** when facilities exist but geography or access remains weak
+- **Investigate** when the signal is mixed or needs administrative review
 
-Chikitsa helps planners turn many district reviews into a more defensible resource-allocation queue.
+This turns district review into a **resource-allocation queue** instead of a flat ranking.
 
-## How we built it
+## Demo Flow
 
-We built Chikitsa as a planner-facing geospatial analytics app on Databricks.
+1. **Start with India:** one smooth district map with facility GPS pins layered over district boundaries.
+2. **Focus on a state:** zoom into a state and inspect ownership, facility types, and service evidence.
+3. **Turn on Real deserts:** recolor districts by apparent medical desert signal.
+4. **Select a standout district:** open a decision audit with score, evidence, services, and action class.
+5. **Ask the district copilot:** use an evidence-grounded agent with a visible trace.
+6. **Save confirmed evidence:** write an append-only Lakebase record with notes and chat history.
+7. **Review all districts:** build a defensible queue for resource allocation.
+
+## How We Built It
+
+We built Chikitsa as a full-stack Databricks app with a Lakebase-backed planning workflow.
 
 The app combines:
 
-- NFHS-5 district health indicators from 2019-2021
-- Discovered marketplace facility records
-- Facility coordinates and district boundaries
-- PIN and geography quality signals
-- Cleaned website and service-category evidence
-- Rule-based planning action classes
-- A district copilot agent for evidence review
+- **NFHS-5 district health indicators** from 2019-2021
+- **Discovered marketplace facility records**
+- **Facility coordinates and district boundaries**
+- **PIN and geography quality signals**
+- **Cleaned website and service-category evidence**
+- **Rule-based planning action classes**
+- **A district copilot agent for evidence review**
+- **Append-only confirmed evidence write-back**
 
-The landing experience is one smooth India map. District boundaries stay visible, facility GPS pins render on top, and planners can filter pins by ownership, facility type, or service evidence. The Real deserts toggle recolors districts by apparent shortage using district need and coordinate-based facility scarcity.
+The landing map is designed to keep the evidence visible. District boundaries stay visible, facility GPS pins render on top, and the planner can filter pins by ownership, facility type, and services. The **Real deserts** toggle recolors districts by apparent shortage, while the **Confirmed** toggle highlights districts with planner-reviewed evidence.
 
-When a district is selected, the side panel becomes a decision audit. It shows the apparent shortage score, evidence-adjusted priority, coordinate facility count, evidence discount, ownership context, service evidence, NFHS population attributes, and the recommended action class.
+The district copilot is intentionally constrained. The server retrieves deterministic Lakebase evidence first. The Python ReAct agent can inspect that evidence, attempt public web context, and return a short answer. The UI shows the agent trace so the user can see whether the agent checked Lakebase, searched public context, or prepared the final answer.
 
-The district copilot is a plain Python ReAct-style agent. The server retrieves deterministic Lakebase evidence first, then the agent can inspect that evidence, attempt public web context, and return a compact planning answer. The UI shows the agent trace so planners can see whether it checked Lakebase evidence, used web context, or prepared the final answer.
+Confirmed findings are stored as auditable Lakebase rows. They do not overwrite raw data; they preserve the planning decision trail.
 
-If the team agrees with a finding, they can save confirmed evidence. That writes an append-only Lakebase row with the answer, confidence delta, source context, planner notes, and chat history. It does not overwrite raw data; it creates an audit trail.
+## Challenges We Ran Into
 
-## Challenges we ran into
+### Avoiding false certainty
 
-The biggest challenge was avoiding false certainty.
+The biggest challenge was making the app honest. Marketplace facility counts are discovered records, not a complete provider inventory. A low facility count may indicate a real shortage, but it may also indicate weak source coverage.
 
-Marketplace facility counts are discovered records, not a complete provider inventory. A low facility count might mean real shortage, but it might also mean weak source coverage. NFHS-5 reflects 2019-2021 conditions, so it is useful district context but not current ground truth.
+NFHS-5 is also 2019-2021 data. It is valuable district context, but it should not be presented as current ground truth.
 
-Another challenge was making the map honest. A choropleth can make a district look conclusively underserved even when the underlying facility data is thin. We designed the UI to show both the district signal and the raw facility pins, so planners can see the evidence behind the score.
+### Designing a trustworthy map
 
-The copilot also needed constraints. It should not invent policy or clinical guidance. It should explain retrieved evidence, uncertainty, caveats, and next verification steps.
+A choropleth can make a district look conclusively underserved even when the underlying facility data is thin. We designed Chikitsa to show both:
 
-Finally, public web search is harder than it looks. Generic web results are noisy, and official hospital sources should be ranked above directories or social pages. That shaped our future roadmap: better source tools and human-approved data repair.
+- The district-level shortage signal
+- The raw facility pins and service evidence behind that signal
 
-## Accomplishments that we're proud of
+That lets planners ask the right question: **is this a real medical desert, or do we need to verify the evidence first?**
 
-We are proud that Chikitsa focuses on real government decisions instead of just another dashboard.
+### Keeping the copilot grounded
 
-The app does not simply rank districts by shortage. It asks whether the shortage signal is reliable enough to act on. That distinction changes the answer:
+The copilot needed strict boundaries. It should not invent policy, provide clinical guidance, or generate unsupported recommendations. It should explain retrieved evidence, uncertainty, caveats, and verification steps.
 
-- A district with high need and reliable evidence may be a Build candidate.
-- A district with high need but weak facility evidence becomes Verify.
-- A district with facilities but poor service match may become Upgrade.
-- A district with facilities but poor geography may become Improve access.
+### Public web evidence is noisy
 
-We are also proud of the district workflow. A planner can start at India, focus on a state, inspect facility and service evidence, select a district, ask the copilot to investigate, and save confirmed evidence. That turns a map into an operational planning process.
+Generic web results are inconsistent. Official hospital sources should outrank directories, social pages, and aggregator listings. This became one of the clearest future-state priorities: better source tools and human-approved data repair.
 
-## What we learned
+## Accomplishments We're Proud Of
+
+We are proud that Chikitsa focuses on real government decisions, not just visualization.
+
+The app does not simply rank districts by shortage. It asks whether the shortage signal is reliable enough to act on. That changes the outcome:
+
+- High need plus reliable evidence can become **Build**
+- High need plus weak facility evidence becomes **Verify**
+- Facilities with poor service match become **Upgrade**
+- Facilities with poor geographic access become **Improve access**
+
+We are also proud of the district workflow:
+
+**Map -> Filter -> Select -> Investigate -> Confirm -> Allocate**
+
+That workflow turns a map into an operational planning process. It gives a government team an audit trail from raw evidence to action class.
+
+## What We Learned
 
 We learned that public-health planning tools need to communicate evidence quality as clearly as they communicate need.
 
-A low facility count is not always an instruction to build. Sometimes it is an instruction to verify. Making that distinction changes the workflow from "rank and act" to "rank, explain, verify, and choose the right next action."
+A low facility count is not always an instruction to build. Sometimes it is an instruction to verify.
 
-We also learned that a useful copilot for government planning should be evidence-grounded and auditable. The valuable answer is not a long recommendation. It is a short explanation of action, evidence, caveat, and next step, with a trace showing how the agent reached it.
+That distinction changes the workflow from **rank and act** to **rank, explain, verify, and choose the right next action**.
 
-## What's next for Chikitsa
+We also learned that the best planning copilot is not the one that writes the longest answer. It is the one that gives a compact, evidence-grounded explanation with a visible trace and a clear next step.
 
-Next, we want to make the agent more useful and reduce manual verification over time.
+## What's Next
 
-The future state includes:
+The next step is to make the agent stronger and reduce manual verification over time.
+
+Future work includes:
 
 - Better public-source search for official hospital registries, facility websites, and government listings
 - Source ranking so official government and hospital sources beat generic web directories
@@ -102,7 +149,18 @@ The future state includes:
 - Stronger service availability extraction from official websites and facility pages
 - Agent-suggested fixes for missing websites, missing services, suspicious coordinates, and ownership mismatches
 - Human-in-the-loop approval before backend data changes are written
-- Automatic refresh so confirmed fixes make the frontend evidence cleaner and more defensible
+- Automatic refresh so confirmed fixes make frontend evidence cleaner and more defensible
 
-The long-term goal is a planning system where the agent helps fill data gaps, proposes backend corrections, and keeps the district evidence clean enough for governments to allocate resources with more confidence.
+The long-term goal is a planning system where the agent helps fill data gaps, proposes backend corrections, and keeps district evidence clean enough for governments to allocate resources with confidence.
 
+## Built With
+
+- Databricks Apps
+- Databricks Lakebase
+- Databricks Model Serving
+- React
+- TypeScript
+- Python
+- ECharts
+- NFHS-5 public health indicators
+- India healthcare facility and geography datasets
