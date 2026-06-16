@@ -1,9 +1,54 @@
 # Chikitsa — Evidence-aware healthcare prioritization
 
-**Status:** approved design (2026-06-15)
+**Status:** approved design (2026-06-15), reconciled against `7960b48` (2026-06-15)
 **Author:** brainstormed with Claude Opus 4.7 in session
 **Scope:** single comprehensive design spec for the Chikitsa hackathon MVP and immediate post-hackathon path
 **Companion:** `IMPLEMENTATION_PLAN.md` (commit `1a8b397`) is the execution-ordered work breakdown derived from this design
+
+---
+
+## 0. Implementation status snapshot (as of `7960b48`)
+
+This snapshot exists so a reader doesn't waste time on what's already built. Pipeline, validation, and architecture phases land continuously; this captures the state at the time the spec was reconciled.
+
+**Built and matches spec**
+
+- DQ patch in `pipeline/facilities_curated.sql` (state recovery via PIN-directory longest-match, `state_key_quality` and `facility_row_quality` flags).
+- Trust components 1–5 (`t_facility_presence`, `t_geocoding`, `t_pin_unambiguous`, `t_flagged_inverse`, `t_indicator_quality`) in `pipeline/district_planning_signals.sql` and the Lakebase-Postgres twin at `chikitsa-copilot/sql/lakebase_district_planning_signals.sql`.
+- Action class CASE expression (with one threshold change from spec; see §11.1).
+- `/api/map/state/:state_key/{districts,coverage,facilities}` endpoints in `chikitsa-copilot/server/routes/chikitsa-routes.ts`.
+- `/api/quality/contamination` endpoint.
+- State-key validation via `parseStateKey` regex.
+- 36 per-state district-boundary GeoJSON files at `client/public/state-district-boundaries/{state_key}.json`.
+- `client/src/components/DistrictStateMap.tsx` (reusable per-state choropleth).
+- State drill mode in `IndiaMapPage` (`mode: 'india' | 'state'` with parallel fetches).
+- DQ files `pipeline/dq_checks.sql` and `pipeline/dq_expectations.sql`.
+- `queryWithFallback` pattern for degraded reads (see §9).
+- `/api/location-options` endpoint for state and district filter dropdowns.
+
+**Not yet built (priority order)**
+
+1. WorldPop population grid (`build_population_grid.py` and `population_grid_h3` Delta).
+2. Real `desert_grid` geometry that joins `facility_coverage_h3` × `population_grid_h3` (today's `desert_grid.sql` is a one-row-per-district stub).
+3. Service taxonomy (`pipeline/service_taxonomy.yaml`), `facility_services.sql`, per-service `is_covered_<service>` columns, demand-weighted blend.
+4. LLM long-tail state recovery (`scripts/llm_state_recovery.py`).
+5. Two-pass website evidence pipeline (`scripts/website_check.ts`, `chikitsa_app.facility_website_evidence`, the new trust components `t_website_corroboration`, `t_operator_concordance`, `t_service_evidence`).
+6. Agentic copilot loop with 8 tools (today's `/api/copilot/analyze` is single-shot with a richer prompt — see §6 for what changes).
+7. Enrichments (RHS, Census 2011, NITI ADP) and the `t_official_concordance` component.
+8. ROI estimator `pipeline/intervention_roi.sql` and the `draft_intervention` agent tool.
+9. BriefPage as the front door (today's landing is OverviewPage; route at `/` is unchanged).
+10. Reliability-framing rename in UI labels and copilot system prompt.
+11. Marketplace Delta share.
+
+**Decisions that drifted from earlier conversation but stay in scope**
+
+- Google Places: a `chikitsa_app.facility_external_match` table and `/api/copilot/reviews` endpoint shipped as a stub, returning empty reviews. Section 4.4 had said drop Google entirely; this spec now keeps the *schema and endpoint* as **deferred / stretch** so nothing has to be ripped out, with no enrichment script committed for the MVP. Live reviews are out of MVP scope.
+
+**Design choices the commit got right that the spec didn't anticipate**
+
+- **`queryWithFallback` pattern**: server-side dual-SQL with the inline `DISTRICT_RANKING_SQL` as a fallback when the materialized view isn't synced. Now part of §9.
+- **Dual SQL location**: `pipeline/*.sql` for Databricks materialized views and `chikitsa-copilot/sql/lakebase_*.sql` for Postgres-flavor views (no `CREATE OR REFRESH MATERIALIZED VIEW`, explicit `::DOUBLE PRECISION` casts). Documented in §4.
+- **`/api/location-options`**: state + district vocabulary for the UI filter dropdowns; sourced from `district_health_profiles`. Added to §5.1.
 
 ---
 
@@ -61,7 +106,7 @@ UI labels read **"evidence reliability"** or **"reliability adjustment."** The D
 - We do not provide clinical advice or individual treatment recommendations.
 - We do not claim political causation.
 - We do not produce travel-time isochrones (no road graph) — buffers are Euclidean and labeled as such.
-- We do not persist Google review content (Google removed entirely from this design — see §4.4).
+- We do not persist Google review content. Google review *summarization* is out of MVP scope; the Place Details schema and stub `/api/copilot/reviews` endpoint that already shipped are retained as a deferred path (§4.4 + §5.4) with no enrichment script committed.
 - We do not attempt machine-learning column-position recovery for the 88 column-shift rows; we quarantine them.
 
 ### 2.3 Success criteria for the hackathon demo
@@ -130,6 +175,15 @@ The agent boundary is strict: server-side tools run as the app principal against
 ## 4. Components
 
 Eleven components plus the API, frontend, and Marketplace deliverable.
+
+### 4.0 Dual SQL location convention
+
+Most data-layer views are authored twice for the two SQL dialects:
+
+- `pipeline/<view>.sql` — Databricks SQL flavor. Uses `CREATE OR REFRESH MATERIALIZED VIEW`, `h3_longlatash3`, `h3_kring`, `h3_distance`, `h3_index_to_parent`, and Spark-style numeric coercion. This is the lineage source for the medallion DAG.
+- `chikitsa-copilot/sql/lakebase_<view>.sql` — Postgres flavor for Lakebase. Uses `CREATE OR REPLACE VIEW`, `::DOUBLE PRECISION` casts, no H3 builtins (Lakebase-side joins read pre-computed H3 columns from synced Delta tables). This is what the app's Express server queries directly through `appkit.lakebase.query`.
+
+Both files must produce the same output schema. Discrepancies are caught by the DQ gate's row-count assertions and the API-layer integration tests. When a view is added or modified, both files change in the same commit.
 
 ### 4.1 Data quality layer (`pipeline/facilities_curated.sql`, modified)
 
@@ -227,6 +281,58 @@ The 706-row gold view. Columns:
   | `t_service_evidence` | sampled extraction signal with bootstrap CI |
   | `t_official_concordance` | FDR public count / RHS official public count |
 - **Trust composite**: `evidence_trust_score` = weighted mean of NON-NULL components, weights renormalized. Default weights documented in a SQL comment block; they sum to 1.0 across components present.
+
+  **Reference SQL (must replace today's `COALESCE(t_x, 50)` pattern in `pipeline/district_planning_signals.sql` and the Lakebase twin):**
+
+  ```sql
+  -- Sum of weights for components that are NOT NULL for this row,
+  -- then divide the contribution sum by that to renormalize.
+  -- A district with zero facilities (so geocoding/pin/flagged/website
+  -- components are NULL) is scored only on facility_presence + indicator_quality
+  -- + any other defined components — never penalized for absent data.
+  WITH parts AS (
+    SELECT
+      *,
+      -- contribution = component × weight, NULL when component is NULL
+      t_facility_presence  * 0.30                                 AS c_pres,
+      t_geocoding          * 0.15                                 AS c_geo,
+      t_pin_unambiguous    * 0.10                                 AS c_pin,
+      t_flagged_inverse    * 0.15                                 AS c_flag,
+      t_indicator_quality  * 0.15                                 AS c_ind,
+      t_website_corroboration * 0.05                              AS c_web,
+      t_operator_concordance  * 0.05                              AS c_opcon,
+      t_service_evidence      * 0.03                              AS c_svc,
+      t_official_concordance  * 0.02                              AS c_offcon,
+      -- weight contribution; 0 if component is NULL
+      CASE WHEN t_facility_presence  IS NULL THEN 0 ELSE 0.30 END AS w_pres,
+      CASE WHEN t_geocoding          IS NULL THEN 0 ELSE 0.15 END AS w_geo,
+      CASE WHEN t_pin_unambiguous    IS NULL THEN 0 ELSE 0.10 END AS w_pin,
+      CASE WHEN t_flagged_inverse    IS NULL THEN 0 ELSE 0.15 END AS w_flag,
+      CASE WHEN t_indicator_quality  IS NULL THEN 0 ELSE 0.15 END AS w_ind,
+      CASE WHEN t_website_corroboration IS NULL THEN 0 ELSE 0.05 END AS w_web,
+      CASE WHEN t_operator_concordance  IS NULL THEN 0 ELSE 0.05 END AS w_opcon,
+      CASE WHEN t_service_evidence      IS NULL THEN 0 ELSE 0.03 END AS w_svc,
+      CASE WHEN t_official_concordance  IS NULL THEN 0 ELSE 0.02 END AS w_offcon
+    FROM components
+  )
+  SELECT
+    *,
+    CASE
+      WHEN (w_pres + w_geo + w_pin + w_flag + w_ind
+            + w_web + w_opcon + w_svc + w_offcon) = 0 THEN NULL
+      ELSE ROUND(
+        (COALESCE(c_pres,0) + COALESCE(c_geo,0) + COALESCE(c_pin,0)
+         + COALESCE(c_flag,0) + COALESCE(c_ind,0)
+         + COALESCE(c_web,0) + COALESCE(c_opcon,0)
+         + COALESCE(c_svc,0) + COALESCE(c_offcon,0))
+        / (w_pres + w_geo + w_pin + w_flag + w_ind
+           + w_web + w_opcon + w_svc + w_offcon),
+        1)
+    END AS evidence_trust_score
+  FROM parts;
+  ```
+
+  **Why not `COALESCE(t_x, 50)`** (the current implementation pattern): defaulting NULL components to 50 silently penalizes — or in our case, silently *flatters* — districts that have no facilities. A district with zero facilities gets `t_geocoding = NULL` because there is nothing to geocode; treating that as "the geocoding is mid-quality" is a fabrication that biases the composite toward 50. The renormalization above is the correct asymmetric handling: absence drops out, presence carries the weight.
 - **Confidence**: `confidence_band ∈ {direct, borrowed, insufficient}`, `sample_size_for_service_evidence`, `trust_components_used` (array).
 - **Spatial fractions** (per service): `desert_area_pct_<s>`, `desert_area_pct_<s>_trust_adjusted`, `desert_population_<s>`, `desert_population_pct_<s>` and trust-adjusted variants.
 - **Demand-weighted headline**: `weighted_desert_pct = Σ desert_pct_<s> × demand_weight_<s>` and trust-adjusted variant.
@@ -273,6 +379,7 @@ Express routes, all reading from Lakebase. Three groups: deterministic read, int
 - `GET /api/map/state/:state_key/coverage` — H3 desert grid for that state. Both base and trust-adjusted flags ship in one payload, all 11 services. Server-side filter on `population > 0 OR NOT is_covered_any_trust_adjusted` to halve payload. `Cache-Control: max-age=300`.
 - `GET /api/map/state/:state_key/facilities` — scatter overlay rows.
 - `GET /api/quality/contamination` — DQ counts for the Brief page header strip.
+- `GET /api/location-options?state?` — canonical state and district vocabulary for filter dropdowns. Sourced from `district_health_profiles`. Returns `{ states: [{state_name, state_key, district_count}], districts: [{state_name, state_key, district_name, district_key}] }`. Used by every page that exposes a state/district filter; centralizing the lookup avoids each page re-deriving it from `/api/districts`.
 
 ### 5.2 Intelligent endpoints
 
@@ -282,9 +389,14 @@ Express routes, all reading from Lakebase. Three groups: deterministic read, int
 
 - `GET/POST/PATCH/DELETE /api/interventions` — existing CRUD, extended with `verification_path`, `target_outcome_metric`, `target_outcome_value`, `est_capex_cr`, `est_aqap` columns.
 
-### 5.4 Removed endpoints
+### 5.4 Deferred endpoints (Google)
 
-- All Google Places integration. No `/api/copilot/reviews`. No `chikitsa_app.facility_external_match` table. The patient-narrative signal is out of scope for this design; website evidence is the primary external corroboration source.
+The earlier draft of this spec said "drop Google entirely." Commit `7960b48` shipped a stub instead — `chikitsa_app.facility_external_match` table at startup, `/api/copilot/reviews` endpoint that returns `{ reviews: [], reason: 'no_match' }` for every request because no enrichment has run. The spec now reflects what's there:
+
+- The table and the endpoint **stay**, as *deferred* / *stretch*. Nothing in the MVP relies on either.
+- No enrichment script ships in the MVP. Without one, the endpoint always returns the empty-reviews shape, which is correct behavior for "no match found."
+- If a post-hackathon iteration wants the live-reviews narrative, the enrichment is a single Node script (~250 LOC) using Place Search → Place Details. The schema is already in place to receive it.
+- Website evidence (§4.6) remains the primary external corroboration source for the MVP. It exists in the *spec* but not yet in code.
 
 ---
 
@@ -386,6 +498,14 @@ Existing CRUD plus AI-drafted intervention prefill. When a planner clicks "Open 
 
 No structural changes. Inherits the new `state_key_quality` and `facility_row_quality` columns in facility result cards.
 
+### 7.6 `DistrictStateMap` reusable component
+
+Lives at `client/src/components/DistrictStateMap.tsx`. Lazy-loads the per-state district-boundary GeoJSON from `client/public/state-district-boundaries/{state_key}.json` (one file per state, 36 total) and registers it with ECharts as `state-districts-{state_key}`. Renders a district choropleth shaded by `trust_adjusted_score` (sequential ramp), with the optionally-passed `districtKey` prop highlighted in red.
+
+Used by IndiaMapPage's drill-down side panel today and by the Copilot page when `?state=&district=` are present. Available for reuse anywhere a small "this district within its state" inset is wanted (Plans page intervention drafts, Explore facility cards).
+
+Props: `{ stateKey, stateName?, districtKey }`. Internal cache keyed by `stateKey` so re-rendering the same state doesn't re-fetch.
+
 ---
 
 ## 8. Marketplace deliverable
@@ -397,6 +517,28 @@ Databricks Delta share publishing the gold-layer tables: `district_planning_sign
 ## 9. Failure modes (committed degradation paths)
 
 Default policy: **graceful degradation with explicit banners**. Never silently degrade, never hard-fail the whole UI when only one layer is sick. Asymmetric NULL handling on trust components is the property that makes most of this free.
+
+### 9.0 `queryWithFallback` — the canonical degradation pattern
+
+Each Lakebase read endpoint that depends on `district_planning_signals` issues SQL through a small wrapper:
+
+```ts
+async function queryWithFallback(
+  appkit: ChikitsaAppKit,
+  primarySql: string,    // SELECT from public.district_planning_signals
+  fallbackSql: string,   // inline DISTRICT_RANKING_SQL against UC sources
+  params: unknown[] = [],
+) {
+  try {
+    return await appkit.lakebase.query(primarySql, params);
+  } catch (err) {
+    console.warn('[chikitsa] Falling back to inline planning SQL:', err.message);
+    return appkit.lakebase.query(fallbackSql, params);
+  }
+}
+```
+
+This is what makes the app shippable before pipeline runs and Lakebase syncs. The fallback computes the same trust composite inline against `facilities_curated`, `pincode_geography`, `district_health_profiles` — the three views that already exist in Lakebase. Every endpoint that reads from the gold view must use this wrapper. The fallback covers `district_planning_signals` missing (the one full-stop failure below becomes degraded-graceful through the wrapper); the table below documents the *user-visible* effects when the fallback is the only path that succeeds.
 
 | Component missing | Behavior |
 |---|---|
@@ -452,6 +594,10 @@ Both files return rows only on failure. Pipeline task fails if either returns ro
 `dq_checks.sql` covers structural assertions: row counts (706 districts, ~2.2M coverage rows, etc.), NULL bans on required columns, `purbi/purba champaran` alias regression, trust-component variance ≥ 5 per component (catches flat signals), DQ patch counts within expected bands, sampling design integrity.
 
 `dq_expectations.sql` codifies sanity expectations written before data lands: Bihar Aspirational Districts mostly land in Verify or Build (≥9 of 13); Patna does not land in Verify; Saharsa/Kishanganj/Jehanabad land in Verify with `t_facility_presence < 30`; national Verify rate within 25–65%; districts with high maternal demand and 0 maternal-offering facilities don't end up in Upgrade.
+
+**Action threshold note.** The Verify rule shipped in `7960b48` is `evidence_trust_score < 50 OR t_facility_presence < 30`. Earlier drafts of this spec said `evidence_trust_score < 50` only. The shipped rule is correct — and stricter — because districts with zero or near-zero facility presence should classify Verify even when their other components push the composite above 50 by accident of NULL handling. Once §4.10's renormalization replaces today's `COALESCE(t_x, 50)`, the second clause may no longer be needed and the rule simplifies. Treat both forms as equivalent for testing during the migration; remove the `OR t_facility_presence < 30` clause only after the renormalization lands and the national Verify-rate sensitivity test confirms the distribution stayed in band.
+
+**Trust component weight note.** `7960b48` ships weights `presence 0.35 / geocoding 0.20 / pin_unambiguous 0.20 / flagged_inverse 0.15 / indicator_quality 0.10` summing to 1.0 across the five present components. This spec's §4.10 specifies a different default `presence 0.30 / geo 0.15 / pin 0.10 / flag 0.15 / ind 0.15 / website_corrob 0.05 / op_concord 0.05 / svc_evid 0.03 / off_concord 0.02`. The shipped weights are correct *for the five-component world we're in today*; they will need to be replaced (not extended) by the spec's nine-component weights when the website + RHS components land. Do not attempt to add the new components incrementally to today's weights — the renormalization in §4.10 makes that math wrong. Cut the weights over in one commit alongside the new components.
 
 ### 11.2 Sensitivity reports (`pipeline/sensitivity_*.sql`, advisory)
 
