@@ -255,6 +255,23 @@ function parseStateKey(value: unknown) {
   return /^[a-z0-9][a-z0-9 _&-]{0,120}$/.test(stateKey) ? stateKey : null;
 }
 
+const facilityStateKeyAliases: Record<string, string[]> = {
+  maharastra: ['maharashtra'],
+  maharashtra: ['maharastra'],
+  'nct of delhi': ['delhi'],
+  delhi: ['nct of delhi'],
+  'jammu & kashmir': ['jammu and kashmir'],
+  'jammu and kashmir': ['jammu & kashmir'],
+  'andaman & nicobar islands': ['andaman and nicobar islands'],
+  'andaman and nicobar islands': ['andaman & nicobar islands'],
+  'dadra and nagar haveli & daman and diu': ['dadra and nagar haveli and daman and diu'],
+  'dadra and nagar haveli and daman and diu': ['dadra and nagar haveli & daman and diu'],
+};
+
+function expandFacilityStateKeys(stateKey: string) {
+  return Array.from(new Set([stateKey, ...(facilityStateKeyAliases[stateKey] ?? [])]));
+}
+
 function toNumber(value: unknown, fallback = 0) {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -272,6 +289,15 @@ async function queryWithFallback(
     const message = error instanceof Error ? error.message : String(error);
     console.warn('[chikitsa] Falling back to inline planning SQL:', message);
     return appkit.lakebase.query(fallbackSql, params);
+  }
+}
+
+async function optionalQuery(appkit: ChikitsaAppKit, sql: string, params: unknown[] = []) {
+  try {
+    return await appkit.lakebase.query(sql, params);
+  } catch (error) {
+    console.warn('[chikitsa] Optional evidence query skipped:', error instanceof Error ? error.message : String(error));
+    return { rows: [] };
   }
 }
 
@@ -378,6 +404,123 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       } catch (error) {
         console.error('[chikitsa] Failed to list districts:', error);
         res.status(500).json({ error: 'Failed to load district priorities.' });
+      }
+    });
+
+    app.get('/api/district-context', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+      const district = typeof req.query.district === 'string' ? req.query.district.trim().toLowerCase() : '';
+
+      if (!state || !district) {
+        res.status(400).json({ error: 'state and district are required.' });
+        return;
+      }
+
+      try {
+        const [districtEvidence, healthProfile, serviceSummary, facilities] = await Promise.all([
+          queryWithFallback(
+            appkit,
+            `${PLANNING_SIGNALS_SELECT_SQL}
+             WHERE state_key = $1 AND district_key = $2
+             LIMIT 1`,
+            `${DISTRICT_RANKING_SQL}
+             WHERE state_key = $1 AND district_key = $2
+             LIMIT 1`,
+            [state, district]
+          ),
+          appkit.lakebase.query(
+            `
+              SELECT
+                state_name,
+                state_key,
+                district_name,
+                district_key,
+                households_surveyed,
+                women_interviewed,
+                men_interviewed,
+                health_insurance_pct,
+                improved_sanitation_pct,
+                four_anc_visits_pct,
+                institutional_birth_pct,
+                child_fully_vaccinated_pct,
+                child_stunted_pct,
+                child_wasted_pct,
+                child_underweight_pct,
+                child_anaemia_pct,
+                women_anaemia_pct,
+                women_high_blood_pressure_pct,
+                men_high_blood_pressure_pct,
+                women_high_blood_sugar_pct,
+                men_high_blood_sugar_pct,
+                cervical_screening_pct,
+                breast_exam_pct,
+                contains_caution_estimate,
+                contains_suppressed_value,
+                source_period
+              FROM public.district_health_profiles
+              WHERE state_key = $1 AND district_key = $2
+              LIMIT 1
+            `,
+            [state, district]
+          ),
+          optionalQuery(
+            appkit,
+            `
+              SELECT *
+              FROM public.district_facility_service_summary
+              WHERE state_key = $1 AND district_key = $2
+              LIMIT 1
+            `,
+            [state, district]
+          ),
+          optionalQuery(
+            appkit,
+            `
+              SELECT
+                f.facility_id,
+                f.name,
+                f.facility_type_clean,
+                f.operator_group,
+                f.city,
+                f.pincode,
+                f.coordinate_quality,
+                f.doctor_count,
+                f.reported_capacity,
+                f.website_quality,
+                f.service_categories
+              FROM public.facility_cleaned_services f
+              JOIN public.pincode_geography p
+                ON f.pincode = p.pincode::TEXT
+                AND p.is_unambiguous
+              WHERE p.state_key = $1
+                AND p.district_key = $2
+                AND f.is_valid_facility_id
+              ORDER BY
+                CASE f.operator_group WHEN 'public_government' THEN 1 WHEN 'private' THEN 2 ELSE 3 END,
+                f.service_category_count DESC,
+                f.name
+              LIMIT 8
+            `,
+            [state, district]
+          ),
+        ]);
+
+        if (districtEvidence.rows.length === 0) {
+          res.status(404).json({ error: 'District evidence was not found.' });
+          return;
+        }
+
+        res.json({
+          district: districtEvidence.rows[0],
+          healthProfile: healthProfile.rows[0] ?? null,
+          serviceSummary: serviceSummary.rows[0] ?? null,
+          facilities: facilities.rows,
+          sourceNote:
+            'NFHS-5 2019-2021 district attributes and discovered marketplace facility records. Facility service categories are text-derived mentions, not verified clinical service availability.',
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load district context:', error);
+        res.status(500).json({ error: 'Failed to load district context.' });
       }
     });
 
@@ -610,13 +753,43 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
         res.status(400).json({ error: 'Invalid state key.' });
         return;
       }
+      const limit = parseLimit(req.query.limit, 10000, 50000);
+      const facilityStateKeys = expandFacilityStateKeys(stateKey);
 
       try {
-        const result = await appkit.lakebase.query(
+        const result = await queryWithFallback(
+          appkit,
           `
             SELECT
               facility_id,
               name,
+              facility_type_clean AS facility_type,
+              latitude,
+              longitude,
+              CASE operator_group
+                WHEN 'public_government' THEN 'public'
+                WHEN 'private' THEN 'private'
+                ELSE 'unknown'
+              END AS operator_type,
+              city,
+              pincode,
+              website_quality,
+              service_categories,
+              false AS places_matched
+            FROM public.facility_cleaned_services
+            WHERE state_key = ANY($1::TEXT[])
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND coordinate_quality = 'plausible_india'
+              AND is_valid_facility_id
+            ORDER BY name
+            LIMIT $2
+          `,
+          `
+            SELECT
+              facility_id,
+              name,
+              facility_type,
               latitude,
               longitude,
               CASE
@@ -624,16 +797,20 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
                 WHEN LOWER(COALESCE(operator_type, '')) LIKE '%private%' THEN 'private'
                 ELSE 'unknown'
               END AS operator_type,
+              city,
+              pincode,
+              NULL::TEXT AS website_quality,
+              NULL::TEXT AS service_categories,
               false AS places_matched
             FROM public.facilities_curated
-            WHERE state_key = $1
+            WHERE state_key = ANY($1::TEXT[])
               AND latitude IS NOT NULL
               AND longitude IS NOT NULL
               AND coordinate_quality = 'plausible_india'
             ORDER BY name
-            LIMIT 5000
+            LIMIT $2
           `,
-          [stateKey],
+          [facilityStateKeys, limit]
         );
         res.json(result.rows);
       } catch (error) {
@@ -827,7 +1004,15 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       const facilitySampleLimit = districtKey ? 25 : 20;
 
       try {
-        const [districtEvidence, facilitySummary, facilitySamples, qualityEvidence] = await Promise.all([
+        const [
+          districtEvidence,
+          facilitySummary,
+          facilitySamples,
+          publicFacilityDetails,
+          healthProfile,
+          serviceSummary,
+          qualityEvidence,
+        ] = await Promise.all([
           queryWithFallback(
             appkit,
             `${PLANNING_SIGNALS_SELECT_SQL}
@@ -893,6 +1078,100 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             `,
             [stateKey, districtKey, facilitySampleLimit]
           ),
+          districtKey
+            ? optionalQuery(
+                appkit,
+                `
+                  SELECT
+                    f.facility_id,
+                    f.name,
+                    f.facility_type_clean,
+                    f.operator_group,
+                    f.city,
+                    f.state_or_region,
+                    p.district_name,
+                    p.state_name,
+                    f.pincode,
+                    f.latitude,
+                    f.longitude,
+                    f.coordinate_quality,
+                    f.pincode_quality,
+                    f.capacity_outlier_flag,
+                    f.completeness_score,
+                    f.doctor_count,
+                    f.reported_capacity,
+                    f.website_url_clean,
+                    f.website_quality,
+                    f.has_source_urls,
+                    f.service_categories,
+                    f.service_signal_quality
+                  FROM public.facility_cleaned_services f
+                  JOIN public.pincode_geography p
+                    ON f.pincode = p.pincode::TEXT
+                    AND p.is_unambiguous
+                  WHERE p.state_key = $1
+                    AND p.district_key = $2
+                    AND f.operator_group = 'public_government'
+                    AND f.is_valid_facility_id
+                  ORDER BY
+                    f.service_category_count DESC,
+                    f.website_signal_score DESC,
+                    f.completeness_score DESC,
+                    f.name
+                  LIMIT 12
+                `,
+                [stateKey, districtKey]
+              )
+            : Promise.resolve({ rows: [] }),
+          districtKey
+            ? appkit.lakebase.query(
+                `
+                  SELECT
+                    state_name,
+                    state_key,
+                    district_name,
+                    district_key,
+                    households_surveyed,
+                    women_interviewed,
+                    men_interviewed,
+                    health_insurance_pct,
+                    improved_sanitation_pct,
+                    four_anc_visits_pct,
+                    institutional_birth_pct,
+                    child_fully_vaccinated_pct,
+                    child_stunted_pct,
+                    child_wasted_pct,
+                    child_underweight_pct,
+                    child_anaemia_pct,
+                    women_anaemia_pct,
+                    women_high_blood_pressure_pct,
+                    men_high_blood_pressure_pct,
+                    women_high_blood_sugar_pct,
+                    men_high_blood_sugar_pct,
+                    cervical_screening_pct,
+                    breast_exam_pct,
+                    contains_caution_estimate,
+                    contains_suppressed_value,
+                    source_period
+                  FROM public.district_health_profiles
+                  WHERE state_key = $1 AND district_key = $2
+                  LIMIT 1
+                `,
+                [stateKey, districtKey]
+              )
+            : Promise.resolve({ rows: [] }),
+          districtKey
+            ? optionalQuery(
+                appkit,
+                `
+                  SELECT *
+                  FROM public.district_facility_service_summary
+                  WHERE state_key = $1 AND district_key = $2
+                  LIMIT 1
+                `,
+                [stateKey, districtKey]
+              )
+            : Promise.resolve({ rows: [] }),
           appkit.lakebase.query(
             `
             SELECT
@@ -917,6 +1196,9 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           districts: districtEvidence.rows,
           facilitySummaryByDistrict: facilitySummary.rows,
           facilitySamples: facilitySamples.rows,
+          publicFacilityDetails: publicFacilityDetails.rows,
+          healthProfile: healthProfile.rows[0] ?? null,
+          serviceSummary: serviceSummary.rows[0] ?? null,
           quality: qualityEvidence.rows[0],
           sourcePeriod: 'NFHS-5 (2019-2021) and a marketplace facility snapshot',
           retrievalScope: {
@@ -926,11 +1208,12 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             districtRowLimit: districtLimit,
             districtCoverage:
               districtKey || stateKey
-                ? 'complete for requested state or district, up to the configured safety limit'
+                ? 'all matching district score rows returned for the requested state or district, up to the configured safety limit'
                 : 'national ranking capped for prompt size',
             facilitySummaryRowsReturned: facilitySummary.rows.length,
             facilityExampleRowsReturned: facilitySamples.rows.length,
             facilityExampleLimit: facilitySampleLimit,
+            publicFacilityDetailRowsReturned: publicFacilityDetails.rows.length,
           },
         };
 
@@ -942,6 +1225,10 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'Do not use the phrase "complete coverage" in the final answer.',
           'The districts array is the authoritative ranked district evidence for the requested scope.',
           'Use facilitySummaryByDistrict for facility count, coordinate quality, capacity flag, completeness, and ambiguous PIN evidence.',
+          'When healthProfile is present, use it for NFHS district population-survey attributes and health burden indicators. Do not call these current population counts.',
+          'When serviceSummary is present, use it for discovered hospital ownership mix, cleaned website evidence, and text-derived service mentions. State that service mentions are not verified clinical availability.',
+          'When publicFacilityDetails is present and the user asks for public hospital/facility data or details, answer from publicFacilityDetails directly. Name the facilities and include city, PIN, website quality, coordinate quality, and service categories when available.',
+          'If publicFacilityDetails has rows, do not say the evidence does not identify the public facilities.',
           'The facilitySamples array contains example facility records for QA only; do not summarize it as coverage.',
           'Do not mention sample limits in the final answer unless a specific example record creates a data-quality caveat.',
           'Use retrievalScope when describing district coverage or evidence reviewed.',
@@ -949,7 +1236,19 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'When present, cite desert_area_pct, desert_area_pct_trust_adjusted, and the named trust components driving the action class.',
           'Classify the recommended action as exactly one of: Build, Verify, Upgrade, Improve access, Investigate.',
           'Do not provide medical diagnosis or individual treatment advice.',
-          'Return concise sections: Finding, Recommended action, Evidence, Data quality caveats, Next verification steps.',
+          'Keep planning answers short: maximum 140 words.',
+          'If the user asks to show, list, or provide details for hospitals/facilities, use a facility-list answer instead: maximum 220 words.',
+          'Use compact markdown only. No tables unless the user explicitly asks for a table.',
+          'For planning questions, return exactly this structure:',
+          '**Action:** one of Build, Verify, Upgrade, Improve access, Investigate.',
+          '**Why:** one sentence.',
+          '**Evidence:** three bullets maximum.',
+          '**Caveat:** one bullet maximum.',
+          '**Next step:** one sentence.',
+          'For facility-list questions, return exactly this structure instead:',
+          '**Public facilities found:** bullets with facility name, type, city/PIN, website quality, coordinate quality, and service categories when available.',
+          '**Caveat:** one sentence about discovered snapshot evidence and service mentions.',
+          '**Next step:** one sentence about official validation.',
           `Question: ${question}`,
           `Evidence JSON: ${JSON.stringify(evidence)}`,
         ].join('\n\n');
@@ -959,7 +1258,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           .asUser(req)
           .invoke({
             messages: [{ role: 'user', content: prompt }],
-            max_tokens: 3000,
+            max_tokens: 850,
             reasoning_effort: 'low',
             temperature: 0.2,
           });
