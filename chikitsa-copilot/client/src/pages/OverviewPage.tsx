@@ -601,15 +601,17 @@ function buildCoordinateAccess(features: DistrictBoundaryFeature[], facilities: 
 function changeLabel(district: DistrictPriority | null, access?: CoordinateAccessSummary) {
   if (!district) return 'Data not available';
   const delta = scoreDelta(district, access);
-  if (Math.abs(delta) < 1) return 'No evidence discount';
-  return 'Evidence discount applied';
+  if (delta >= 1) return 'Priority increased';
+  if (delta <= -1) return 'Priority reduced';
+  return 'No material change';
 }
 
 function changeBadgeClass(district: DistrictPriority | null, access?: CoordinateAccessSummary) {
   if (!district) return 'border border-slate-300 bg-slate-100 text-slate-600';
   const delta = scoreDelta(district, access);
-  if (Math.abs(delta) < 1) return 'border border-slate-300 bg-slate-100 text-slate-700';
-  return 'border border-sky-300 bg-sky-100 text-sky-900';
+  if (delta >= 1) return 'border border-rose-300 bg-rose-100 text-rose-900';
+  if (delta <= -1) return 'border border-sky-300 bg-sky-100 text-sky-900';
+  return 'border border-slate-300 bg-slate-100 text-slate-700';
 }
 
 function changeReasons(district: DistrictPriority, access?: CoordinateAccessSummary) {
