@@ -1,4 +1,7 @@
 import type { Application, Request } from 'express';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 
 interface QueryResult {
@@ -26,6 +29,14 @@ interface ChikitsaAppKit {
   serving(): ServingHandle;
 }
 
+interface DistrictAgentResult {
+  answer?: string;
+  model?: string;
+  mode?: string;
+  used_tools?: string[];
+  trace?: Array<Record<string, unknown>>;
+}
+
 const CreateInterventionBody = z.object({
   title: z.string().trim().min(3).max(160),
   state: z.string().trim().min(1).max(100),
@@ -46,6 +57,29 @@ const CopilotBody = z.object({
   question: z.string().trim().min(8).max(1200),
   state: z.string().trim().max(100).optional(),
   district: z.string().trim().max(100).optional(),
+});
+
+const CreateEvidenceOverrideBody = z.object({
+  state_key: z.string().trim().min(1).max(120),
+  district_key: z.string().trim().min(1).max(160),
+  evidence_type: z
+    .enum(['copilot_web_verification', 'official_registry', 'facility_website', 'planner_note'])
+    .default('copilot_web_verification'),
+  source_url: z.string().trim().url().max(1000).optional().or(z.literal('')).default(''),
+  source_title: z.string().trim().max(240).optional().default(''),
+  summary: z.string().trim().min(10).max(4000),
+  confidence_delta: z.number().min(-25).max(25).default(5),
+  notes: z.string().trim().max(2000).optional().default(''),
+  chat_history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().trim().min(1).max(4000),
+      })
+    )
+    .max(12)
+    .optional()
+    .default([]),
 });
 
 const SETUP_SCHEMA_SQL = `CREATE SCHEMA IF NOT EXISTS chikitsa_app`;
@@ -88,6 +122,33 @@ const CREATE_EXTERNAL_MATCH_SQL = `
     matched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     error TEXT
   )
+`;
+
+const CREATE_EVIDENCE_OVERRIDES_SQL = `
+  CREATE TABLE IF NOT EXISTS chikitsa_app.district_evidence_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    state_key TEXT NOT NULL,
+    district_key TEXT NOT NULL,
+    evidence_type TEXT NOT NULL DEFAULT 'copilot_web_verification'
+      CHECK (evidence_type IN ('copilot_web_verification', 'official_registry', 'facility_website', 'planner_note')),
+    source_url TEXT NOT NULL DEFAULT '',
+    source_title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL,
+    confidence_delta DOUBLE PRECISION NOT NULL DEFAULT 0
+      CHECK (confidence_delta >= -25 AND confidence_delta <= 25),
+    status TEXT NOT NULL DEFAULT 'confirmed'
+      CHECK (status IN ('confirmed', 'rejected', 'superseded')),
+    confirmed_by TEXT NOT NULL DEFAULT '',
+    confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    chat_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`;
+
+const ALTER_EVIDENCE_OVERRIDES_CHAT_HISTORY_SQL = `
+  ALTER TABLE chikitsa_app.district_evidence_overrides
+  ADD COLUMN IF NOT EXISTS chat_history JSONB NOT NULL DEFAULT '[]'::jsonb
 `;
 
 const DISTRICT_RANKING_SQL = `
@@ -244,6 +305,57 @@ function extractModelContent(response: unknown): string {
   return JSON.stringify(response);
 }
 
+function runDistrictAgent(payload: Record<string, unknown>) {
+  return new Promise<DistrictAgentResult>((resolve, reject) => {
+    const scriptPath = path.join(process.cwd(), 'server', 'agents', 'district_copilot_agent.py');
+    if (!existsSync(scriptPath)) {
+      reject(new Error(`District agent script not found at ${scriptPath}`));
+      return;
+    }
+
+    const pythonExecutable = process.env.PYTHON_BIN || process.env.PYTHON || 'python3';
+    const child = spawn(pythonExecutable, [scriptPath], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('District agent timed out.'));
+    }, 60000);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(stderr || `District agent exited with code ${code}.`));
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(stdout) as DistrictAgentResult);
+      } catch {
+        reject(new Error(`District agent returned invalid JSON: ${stdout.slice(0, 500)}`));
+      }
+    });
+
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  });
+}
+
 function parseLimit(value: unknown, fallback: number, maximum: number) {
   const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number.NaN;
   return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), maximum) : fallback;
@@ -319,6 +431,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
     ['interventions', CREATE_INTERVENTIONS_SQL],
     ['intervention action migration', ALTER_INTERVENTIONS_ACTION_SQL],
     ['external match', CREATE_EXTERNAL_MATCH_SQL],
+    ['district evidence overrides', CREATE_EVIDENCE_OVERRIDES_SQL],
+    ['district evidence override chat history migration', ALTER_EVIDENCE_OVERRIDES_CHAT_HISTORY_SQL],
   ] as const) {
     try {
       await appkit.lakebase.query(sql);
@@ -417,7 +531,7 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       }
 
       try {
-        const [districtEvidence, healthProfile, serviceSummary, facilities] = await Promise.all([
+        const [districtEvidence, healthProfile, serviceSummary, facilities, evidenceOverrides] = await Promise.all([
           queryWithFallback(
             appkit,
             `${PLANNING_SIGNALS_SELECT_SQL}
@@ -503,6 +617,33 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             `,
             [state, district]
           ),
+          optionalQuery(
+            appkit,
+            `
+              SELECT
+                id,
+                state_key,
+                district_key,
+                evidence_type,
+                source_url,
+                source_title,
+                summary,
+                confidence_delta,
+                status,
+                confirmed_by,
+                confirmed_at,
+                chat_history,
+                notes,
+                created_at
+              FROM chikitsa_app.district_evidence_overrides
+              WHERE state_key = $1
+                AND district_key = $2
+                AND status = 'confirmed'
+              ORDER BY confirmed_at DESC
+              LIMIT 20
+            `,
+            [state, district]
+          ),
         ]);
 
         if (districtEvidence.rows.length === 0) {
@@ -515,12 +656,146 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           healthProfile: healthProfile.rows[0] ?? null,
           serviceSummary: serviceSummary.rows[0] ?? null,
           facilities: facilities.rows,
+          evidenceOverrides: evidenceOverrides.rows,
           sourceNote:
             'NFHS-5 2019-2021 district attributes and discovered marketplace facility records. Facility service categories are text-derived mentions, not verified clinical service availability.',
         });
       } catch (error) {
         console.error('[chikitsa] Failed to load district context:', error);
         res.status(500).json({ error: 'Failed to load district context.' });
+      }
+    });
+
+    app.get('/api/evidence-overrides/summary', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            SELECT
+              state_key,
+              district_key,
+              COUNT(*)::INT AS confirmed_count,
+              ROUND(SUM(confidence_delta)::NUMERIC, 1)::DOUBLE PRECISION AS confidence_delta_total,
+              MAX(confirmed_at) AS latest_confirmed_at
+            FROM chikitsa_app.district_evidence_overrides
+            WHERE status = 'confirmed'
+              AND ($1 = '' OR state_key = $1)
+            GROUP BY state_key, district_key
+            ORDER BY latest_confirmed_at DESC
+          `,
+          [state]
+        );
+        res.json(result.rows);
+      } catch (error) {
+        console.error('[chikitsa] Failed to load evidence override summary:', error);
+        res.status(500).json({ error: 'Failed to load confirmed evidence summary.' });
+      }
+    });
+
+    app.get('/api/evidence-overrides', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+      const district = typeof req.query.district === 'string' ? req.query.district.trim().toLowerCase() : '';
+
+      if (!state || !district) {
+        res.status(400).json({ error: 'state and district are required.' });
+        return;
+      }
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            SELECT
+              id,
+              state_key,
+              district_key,
+              evidence_type,
+              source_url,
+              source_title,
+              summary,
+              confidence_delta,
+              status,
+              confirmed_by,
+              confirmed_at,
+              chat_history,
+              notes,
+              created_at
+            FROM chikitsa_app.district_evidence_overrides
+            WHERE state_key = $1
+              AND district_key = $2
+              AND status = 'confirmed'
+            ORDER BY confirmed_at DESC
+            LIMIT 50
+          `,
+          [state, district]
+        );
+        res.json(result.rows);
+      } catch (error) {
+        console.error('[chikitsa] Failed to load evidence overrides:', error);
+        res.status(500).json({ error: 'Failed to load evidence overrides.' });
+      }
+    });
+
+    app.post('/api/evidence-overrides', async (req, res) => {
+      const parsed = CreateEvidenceOverrideBody.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid evidence override.', details: parsed.error.flatten() });
+        return;
+      }
+
+      const value = parsed.data;
+      const confirmedBy = req.header('x-forwarded-email') ?? req.header('x-forwarded-user') ?? 'Local developer';
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            INSERT INTO chikitsa_app.district_evidence_overrides
+              (
+                state_key,
+                district_key,
+                evidence_type,
+                source_url,
+                source_title,
+                summary,
+                confidence_delta,
+                confirmed_by,
+                chat_history,
+                notes
+              )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+            RETURNING
+              id,
+              state_key,
+              district_key,
+              evidence_type,
+              source_url,
+              source_title,
+              summary,
+              confidence_delta,
+              status,
+              confirmed_by,
+              confirmed_at,
+              chat_history,
+              notes,
+              created_at
+          `,
+          [
+            value.state_key.trim().toLowerCase(),
+            value.district_key.trim().toLowerCase(),
+            value.evidence_type,
+            value.source_url,
+            value.source_title,
+            value.summary,
+            value.confidence_delta,
+            confirmedBy,
+            JSON.stringify(value.chat_history),
+            value.notes,
+          ]
+        );
+        res.status(201).json(result.rows[0]);
+      } catch (error) {
+        console.error('[chikitsa] Failed to create evidence override:', error);
+        res.status(500).json({ error: 'Failed to confirm evidence override.' });
       }
     });
 
@@ -1253,24 +1528,44 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           `Evidence JSON: ${JSON.stringify(evidence)}`,
         ].join('\n\n');
 
-        const modelResponse = await appkit
-          .serving()
-          .asUser(req)
-          .invoke({
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: 850,
-            reasoning_effort: 'low',
-            temperature: 0.2,
+        let answer: string;
+        let agentResult: DistrictAgentResult | null = null;
+        let modelExecution = 'Plain Python ReAct agent';
+        try {
+          agentResult = await runDistrictAgent({
+            question,
+            evidence,
           });
+          answer = agentResult.answer || 'The district copilot did not return an answer.';
+        } catch (agentError) {
+          console.warn(
+            '[chikitsa] Python district agent failed; falling back to direct AppKit serving:',
+            agentError instanceof Error ? agentError.message : agentError
+          );
+          const modelResponse = await appkit
+            .serving()
+            .asUser(req)
+            .invoke({
+              messages: [{ role: 'user', content: prompt }],
+              max_tokens: 850,
+              reasoning_effort: 'low',
+              temperature: 0.2,
+            });
+          answer = extractModelContent(modelResponse);
+          modelExecution = 'Authenticated user (OBO) direct AppKit fallback';
+        }
 
         res.json({
-          answer: extractModelContent(modelResponse),
+          answer,
           evidence,
           trust: {
-            model: 'chatgpt',
-            modelExecution: 'Authenticated user (OBO)',
+            model: agentResult?.model ?? 'chatgpt',
+            modelExecution,
+            agentMode: agentResult?.mode ?? 'direct-fallback',
+            agentTools: agentResult?.used_tools ?? [],
+            agentTrace: agentResult?.trace ?? [],
             dataExecution: 'App service principal',
-            retrieval: 'Deterministic server-side SQL; the model does not generate or execute SQL',
+            retrieval: 'Deterministic server-side SQL; the agent does not generate or execute SQL',
           },
         });
       } catch (error) {

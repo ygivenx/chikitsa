@@ -3,11 +3,18 @@ import { Button, Skeleton, Textarea } from '@databricks/appkit-ui/react';
 import ReactECharts from 'echarts-for-react';
 import * as echarts from 'echarts';
 import DOMPurify from 'dompurify';
-import { ArrowLeft, Bot, Send } from 'lucide-react';
+import { ArrowLeft, Bot, Info, Send } from 'lucide-react';
 import { marked } from 'marked';
 import { fetchJson } from '../lib/api';
-import { actionLabels } from '../lib/chikitsa-copy';
-import type { CopilotResponse, DistrictContextResponse, DistrictPriority, StateFacility } from '../lib/chikitsa-types';
+import { actionDescriptions, actionLabels } from '../lib/chikitsa-copy';
+import type {
+  CopilotResponse,
+  DistrictContextResponse,
+  DistrictEvidenceOverride,
+  DistrictEvidenceOverrideSummary,
+  DistrictPriority,
+  StateFacility,
+} from '../lib/chikitsa-types';
 
 interface DistrictBoundaryGeoJson {
   type: 'FeatureCollection';
@@ -67,6 +74,7 @@ type DistrictChatMessage = {
   role: 'user' | 'assistant';
   content: string;
 };
+type AgentTraceStep = NonNullable<CopilotResponse['trust']['agentTrace']>[number];
 
 const defaultDistrictQuestion = (district: DistrictPriority) =>
   `For ${district.district_name}, summarize discovered hospitals, NFHS population-survey attributes, service evidence, uncertainty, and the recommended planning action.`;
@@ -129,6 +137,115 @@ const pinModeLabels: Record<PinColorMode, string> = {
   facility_type: 'Facility type',
   service: 'Services',
 };
+
+const metricDescriptions = {
+  coordinateDesert:
+    'Apparent shortage score from NFHS need and GPS facility scarcity after assigning pins to district polygons.',
+  evidenceAdjusted:
+    'Planning priority after discounting the shortage signal where source evidence is weaker.',
+  coordinateFacilities: 'Discovered GPS facility records located inside the selected district boundary.',
+  evidenceDiscount: 'How much Evidence Confidence reduced the apparent shortage signal.',
+  publicPrivate: 'Ownership mix in discovered coordinate records. Ownership is context, not Evidence Confidence.',
+  nearestKm: 'Straight-line distance from district center to nearest discovered coordinate facility.',
+  facilityRecords: 'Discovered facility records for this district; not a complete provider registry.',
+  cleanWebsites: 'Facility records with usable website evidence after cleaning obvious placeholders.',
+  serviceBreadth: 'Average number of text-derived service categories per discovered facility record.',
+} as const;
+
+const metricDetails = {
+  coordinateDesert:
+    'Higher means stronger apparent shortage. Formula: NFHS health-need score multiplied by coordinate scarcity from discovered facility pins and nearest-distance penalty.',
+  evidenceAdjusted:
+    'The coordinate desert score after applying Evidence Confidence. Lower than Coordinate desert means the system is discounting the signal because evidence needs verification.',
+  coordinateFacilities:
+    'Count of discovered facility records with plausible GPS coordinates that fall inside this district polygon. This is not a complete registry.',
+  evidenceDiscount:
+    'Difference between Coordinate desert and Evidence-adjusted. A larger discount means the apparent shortage is more likely to need verification before action.',
+} as const;
+
+const metricCardClass = {
+  coordinateDesert: 'border-rose-200 bg-rose-50 text-rose-950',
+  evidenceAdjusted: 'border-sky-200 bg-sky-50 text-sky-950',
+  coordinateFacilities: 'border-emerald-200 bg-emerald-50 text-emerald-950',
+  evidenceDiscount: 'border-amber-200 bg-amber-50 text-amber-950',
+  public: 'border-sky-200 bg-sky-50 text-sky-950',
+  private: 'border-orange-200 bg-orange-50 text-orange-950',
+  nearest: 'border-indigo-200 bg-indigo-50 text-indigo-950',
+  websites: 'border-cyan-300/25 bg-cyan-300/10 text-cyan-50',
+  services: 'border-violet-300/25 bg-violet-300/10 text-violet-50',
+  facilitiesDark: 'border-emerald-300/25 bg-emerald-300/10 text-emerald-50',
+  ownershipDark: 'border-orange-300/25 bg-orange-300/10 text-orange-50',
+} as const;
+
+function actionColorClass(action: keyof typeof actionLabels) {
+  if (action === 'build') return 'border-rose-300 bg-rose-100 text-rose-950';
+  if (action === 'verify') return 'border-amber-300 bg-amber-100 text-amber-950';
+  if (action === 'upgrade') return 'border-violet-300 bg-violet-100 text-violet-950';
+  if (action === 'improve_access') return 'border-sky-300 bg-sky-100 text-sky-950';
+  return 'border-slate-300 bg-slate-100 text-slate-800';
+}
+
+function MetricInfo({ label, detail }: { label: string; detail: string }) {
+  return (
+    <span className="group relative -top-2 ml-1 inline-flex align-super">
+      <button
+        type="button"
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-current/30 bg-white/40 text-[10px] opacity-80 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-current/30"
+        aria-label={`${label} details`}
+      >
+        <Info className="h-2.5 w-2.5" />
+      </button>
+      <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-64 -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 text-left text-xs font-normal leading-5 text-slate-700 opacity-0 shadow-xl transition-opacity group-focus-within:block group-focus-within:opacity-100 group-hover:block group-hover:opacity-100">
+        <span className="block font-semibold text-slate-950">{label}</span>
+        <span className="mt-1 block">{detail}</span>
+      </span>
+    </span>
+  );
+}
+
+function MapToggle({
+  checked,
+  label,
+  description,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  description: string;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      className={`group inline-flex min-w-[190px] items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left shadow-sm transition-all ${
+        checked
+          ? 'border-slate-950 bg-slate-950 text-white'
+          : 'border-slate-200 bg-white text-slate-700 hover:border-slate-400'
+      }`}
+      onClick={onChange}
+    >
+      <span>
+        <span className="block text-xs font-semibold">{label}</span>
+        <span className={`mt-0.5 block text-[11px] ${checked ? 'text-slate-300' : 'text-slate-500'}`}>
+          {description}
+        </span>
+      </span>
+      <span
+        className={`relative h-6 w-11 shrink-0 rounded-full border transition-colors ${
+          checked ? 'border-emerald-300 bg-emerald-400' : 'border-slate-300 bg-slate-200'
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+            checked ? 'translate-x-5' : 'translate-x-0.5'
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
 
 const pinPalette = [
   '#2563eb',
@@ -245,6 +362,20 @@ function renderMarkdown(content: string) {
   return DOMPurify.sanitize(html);
 }
 
+function traceToolLabel(tool?: string) {
+  if (tool === 'evidence_lookup') return 'Checking Lakebase evidence';
+  if (tool === 'web_search') return 'Searching public web context';
+  if (tool === 'finish') return 'Preparing final answer';
+  return 'Planning next step';
+}
+
+function traceToolClass(tool?: string) {
+  if (tool === 'web_search') return 'border-sky-300/25 bg-sky-300/10 text-sky-100';
+  if (tool === 'evidence_lookup') return 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100';
+  if (tool === 'finish') return 'border-violet-300/25 bg-violet-300/10 text-violet-100';
+  return 'border-white/10 bg-white/[0.06] text-slate-200';
+}
+
 function addMapFeatureUids(boundary: DistrictBoundaryGeoJson, stateBoundary: IndiaAdm1GeoJson): DistrictBoundaryGeoJson {
   const districtFeatures = boundary.features.map((feature) => ({
     ...feature,
@@ -289,6 +420,25 @@ function buildDistrictLookup(districts: DistrictPriority[]) {
   });
 
   return lookup;
+}
+
+function buildEvidenceSummaryLookup(rows: DistrictEvidenceOverrideSummary[]) {
+  const lookup = new Map<string, DistrictEvidenceOverrideSummary>();
+
+  rows.forEach((row) => {
+    lookup.set(districtUid(row.state_key, row.district_key), {
+      ...row,
+      confirmed_count: Number(row.confirmed_count) || 0,
+      confidence_delta_total: Number(row.confidence_delta_total) || 0,
+    });
+  });
+
+  return lookup;
+}
+
+async function fetchEvidenceOverrideSummaries() {
+  const rows = await fetchJson<DistrictEvidenceOverrideSummary[]>('/api/evidence-overrides/summary');
+  return buildEvidenceSummaryLookup(rows);
 }
 
 function toFiniteNumber(value: unknown) {
@@ -504,7 +654,12 @@ export function OverviewPage() {
   const [coordinateAccessStatus, setCoordinateAccessStatus] = useState<'loading' | 'ready' | 'partial' | 'failed'>('loading');
   const [facilitiesByState, setFacilitiesByState] = useState<Map<string, StateFacility[]>>(new Map());
   const [showRealDeserts, setShowRealDeserts] = useState(false);
+  const [confirmedOnly, setConfirmedOnly] = useState(false);
+  const [confirmedSummaryByUid, setConfirmedSummaryByUid] = useState<Map<string, DistrictEvidenceOverrideSummary>>(
+    new Map()
+  );
   const [pinColorMode, setPinColorMode] = useState<PinColorMode>('ownership');
+  const [activePinGroups, setActivePinGroups] = useState<string[]>([]);
   const [districtContext, setDistrictContext] = useState<DistrictContextResponse | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
@@ -512,6 +667,19 @@ export function OverviewPage() {
   const [chatMessages, setChatMessages] = useState<DistrictChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [agentTrace, setAgentTrace] = useState<AgentTraceStep[]>([]);
+  const [lastCopilotFinding, setLastCopilotFinding] = useState<{
+    question: string;
+    answer: string;
+    chatHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  } | null>(null);
+  const [confirmDelta, setConfirmDelta] = useState('5');
+  const [confirmSourceUrl, setConfirmSourceUrl] = useState('');
+  const [confirmSourceTitle, setConfirmSourceTitle] = useState('');
+  const [confirmNotes, setConfirmNotes] = useState('');
+  const [confirmSaving, setConfirmSaving] = useState(false);
+  const [confirmMessage, setConfirmMessage] = useState<string | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -553,6 +721,22 @@ export function OverviewPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetchEvidenceOverrideSummaries()
+      .then((lookup) => {
+        if (!cancelled) setConfirmedSummaryByUid(lookup);
+      })
+      .catch(() => {
+        if (!cancelled) setConfirmedSummaryByUid(new Map());
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const districtByUid = useMemo(
     () => buildDistrictLookup(loadedMap?.districts ?? []),
     [loadedMap?.districts]
@@ -575,13 +759,27 @@ export function OverviewPage() {
   const activeUid = hoveredUid ?? selectedUid;
   const selectedDistrict = selectedUid ? districtByUid.get(selectedUid) ?? null : null;
   const selectedCoordinateAccess = selectedUid ? coordinateAccessByUid.get(selectedUid) : undefined;
+  const selectedConfirmedSummary = selectedUid ? confirmedSummaryByUid.get(selectedUid) : undefined;
+  const confirmedVisibleDistrictCount = useMemo(() => {
+    if (!visibleBoundary) return 0;
+    return visibleBoundary.features.filter((feature) => {
+      if (feature.properties.stateKey === 'state-outline') return false;
+      const uid = feature.properties.districtUid ?? districtUid(feature.properties.stateKey, feature.properties.districtKey);
+      return confirmedSummaryByUid.has(uid);
+    }).length;
+  }, [confirmedSummaryByUid, visibleBoundary]);
   const visibleFacilities = useMemo(() => {
     if (focusedStateKey) return facilitiesByState.get(focusedStateKey) ?? [];
     return Array.from(facilitiesByState.values()).flat();
   }, [facilitiesByState, focusedStateKey]);
+  const filteredFacilities = useMemo(() => {
+    if (activePinGroups.length === 0) return visibleFacilities;
+    const activeGroups = new Set(activePinGroups);
+    return visibleFacilities.filter((facility) => activeGroups.has(pinGroup(facility, pinColorMode)));
+  }, [activePinGroups, pinColorMode, visibleFacilities]);
   const facilityPinData = useMemo(
     () =>
-      visibleFacilities.map((facility) => {
+      filteredFacilities.map((facility) => {
         const group = pinGroup(facility, pinColorMode);
         return {
           name: facility.name || 'Unnamed facility',
@@ -596,7 +794,7 @@ export function OverviewPage() {
           },
         };
       }),
-    [pinColorMode, visibleFacilities]
+    [filteredFacilities, pinColorMode]
   );
   const pinLegend = useMemo(() => {
     const groups = new Map<string, number>();
@@ -607,7 +805,6 @@ export function OverviewPage() {
 
     return Array.from(groups.entries())
       .sort(([, left], [, right]) => right - left)
-      .slice(0, 6)
       .map(([group, count]) => ({
         group,
         count,
@@ -655,6 +852,10 @@ export function OverviewPage() {
     echarts.registerMap(activeMapName, visibleBoundary as unknown as Parameters<typeof echarts.registerMap>[1]);
     setRegisteredMapName(activeMapName);
   }, [activeMapName, visibleBoundary]);
+
+  useEffect(() => {
+    setActivePinGroups([]);
+  }, [focusedStateKey, pinColorMode]);
 
   useEffect(() => {
     if (!loadedMap) return;
@@ -712,6 +913,8 @@ export function OverviewPage() {
       setDistrictContext(null);
       setChatQuestion('');
       setChatMessages([]);
+      setAgentTrace([]);
+      setLastCopilotFinding(null);
       return;
     }
 
@@ -721,6 +924,14 @@ export function OverviewPage() {
     setDistrictContext(null);
     setChatMessages([]);
     setChatError(null);
+    setAgentTrace([]);
+    setLastCopilotFinding(null);
+    setConfirmDelta('5');
+    setConfirmSourceUrl('');
+    setConfirmSourceTitle('');
+    setConfirmNotes('');
+    setConfirmMessage(null);
+    setConfirmError(null);
     setChatQuestion(defaultDistrictQuestion(selectedDistrict));
 
     const params = new URLSearchParams({
@@ -751,17 +962,19 @@ export function OverviewPage() {
     if (!selectedDistrict || chatQuestion.trim().length < 8) return;
 
     const question = chatQuestion.trim();
-    setChatMessages((messages) => [
-      ...messages,
-      {
-        id: `${Date.now()}-user`,
-        role: 'user',
-        content: question,
-      },
-    ]);
+    const userMessage: DistrictChatMessage = {
+      id: `${Date.now()}-user`,
+      role: 'user',
+      content: question,
+    };
+    const nextUserMessages = [...chatMessages, userMessage];
+    setChatMessages(nextUserMessages);
     setChatQuestion('');
     setChatLoading(true);
     setChatError(null);
+    setAgentTrace([]);
+    setConfirmMessage(null);
+    setConfirmError(null);
 
     try {
       const result = await fetchJson<CopilotResponse>('/api/copilot/analyze', {
@@ -773,14 +986,22 @@ export function OverviewPage() {
           district: selectedDistrict.district_key,
         }),
       });
-      setChatMessages((messages) => [
-        ...messages,
-        {
-          id: `${Date.now()}-assistant`,
-          role: 'assistant',
-          content: result.answer,
-        },
-      ]);
+      const assistantMessage: DistrictChatMessage = {
+        id: `${Date.now()}-assistant`,
+        role: 'assistant',
+        content: result.answer,
+      };
+      const nextMessages = [...nextUserMessages, assistantMessage];
+      setChatMessages(nextMessages);
+      setLastCopilotFinding({
+        question,
+        answer: result.answer,
+        chatHistory: nextMessages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+      });
+      setAgentTrace(result.trust.agentTrace ?? []);
     } catch (reason) {
       setChatError(reason instanceof Error ? reason.message : 'District copilot failed.');
       setChatQuestion(question);
@@ -789,10 +1010,76 @@ export function OverviewPage() {
     }
   }
 
+  async function confirmLatestEvidence(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selectedDistrict || !lastCopilotFinding) return;
+
+    const parsedDelta = Number(confirmDelta);
+    if (!Number.isFinite(parsedDelta) || parsedDelta < -25 || parsedDelta > 25) {
+      setConfirmError('Evidence Confidence adjustment must be between -25 and 25.');
+      return;
+    }
+
+    setConfirmSaving(true);
+    setConfirmMessage(null);
+    setConfirmError(null);
+
+    try {
+      const summary =
+        lastCopilotFinding.answer.length > 3900
+          ? `${lastCopilotFinding.answer.slice(0, 3900)}...`
+          : lastCopilotFinding.answer;
+      const notes = [`Question: ${lastCopilotFinding.question}`, confirmNotes.trim()].filter(Boolean).join('\n\n');
+      const chatHistory = lastCopilotFinding.chatHistory.slice(-12).map((message) => ({
+        ...message,
+        content: message.content.length > 3900 ? `${message.content.slice(0, 3900)}...` : message.content,
+      }));
+      const created = await fetchJson<DistrictEvidenceOverride>('/api/evidence-overrides', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state_key: selectedDistrict.state_key,
+          district_key: selectedDistrict.district_key,
+          evidence_type: 'copilot_web_verification',
+          source_url: confirmSourceUrl.trim(),
+          source_title: confirmSourceTitle.trim() || 'District copilot confirmed evidence',
+          summary,
+          confidence_delta: parsedDelta,
+          notes: notes.length > 1900 ? `${notes.slice(0, 1900)}...` : notes,
+          chat_history: chatHistory,
+        }),
+      });
+
+      setDistrictContext((current) =>
+        current
+          ? {
+              ...current,
+              evidenceOverrides: [created, ...current.evidenceOverrides.filter((item) => item.id !== created.id)],
+            }
+          : current
+      );
+      setConfirmedSummaryByUid(await fetchEvidenceOverrideSummaries());
+      setConfirmMessage('Confirmed evidence saved to Lakebase with chat history.');
+      setConfirmSourceUrl('');
+      setConfirmSourceTitle('');
+      setConfirmNotes('');
+    } catch (reason) {
+      setConfirmError(reason instanceof Error ? reason.message : 'Failed to confirm evidence.');
+    } finally {
+      setConfirmSaving(false);
+    }
+  }
+
   function returnToCountryView() {
     setFocusedStateKey(null);
     setSelectedUid(null);
     setHoveredUid(null);
+  }
+
+  function togglePinGroup(group: string) {
+    setActivePinGroups((current) =>
+      current.includes(group) ? current.filter((item) => item !== group) : [...current, group]
+    );
   }
 
   const createChartOption = () => {
@@ -819,6 +1106,7 @@ export function OverviewPage() {
           const feature = visibleBoundary.features.find((item) => item.properties.districtUid === params.name);
           const districtName = district?.district_name ?? feature?.properties.districtName ?? 'District';
           const stateName = district?.state_name ?? feature?.properties.stateName ?? 'India';
+          const confirmed = confirmedSummaryByUid.get(params.name);
 
           if (!district) {
             return [`<strong>${districtName}</strong>`, stateName, 'Data not available'].join('<br/>');
@@ -828,6 +1116,9 @@ export function OverviewPage() {
           return [
             `<strong>${district.district_name}</strong>`,
             district.state_name,
+            confirmed
+              ? `Confirmed evidence: ${confirmed.confirmed_count} row(s), delta ${confirmed.confidence_delta_total >= 0 ? '+' : ''}${confirmed.confidence_delta_total}`
+              : 'Confirmed evidence: none yet',
             `Coordinate desert signal: ${baseDesertScoreForAccess(district, access)}`,
             `Evidence-adjusted signal: ${adjustedDesertScore(district, access)}`,
             access
@@ -902,10 +1193,12 @@ export function OverviewPage() {
             const isStateOutline = feature.properties.stateKey === 'state-outline';
             const isActive = activeUid === uid;
             const access = coordinateAccessByUid.get(uid);
+            const confirmed = confirmedSummaryByUid.get(uid);
+            const isFilteredOut = confirmedOnly && !isStateOutline && !confirmed;
 
             return {
               name: uid,
-              value: showRealDeserts && district ? baseDesertScoreForAccess(district, access) : null,
+              value: showRealDeserts && district && !isFilteredOut ? baseDesertScoreForAccess(district, access) : null,
               silent: isStateOutline ? true : undefined,
               tooltip: isStateOutline ? { show: false } : undefined,
               emphasis: isStateOutline ? { disabled: true } : undefined,
@@ -916,11 +1209,23 @@ export function OverviewPage() {
                     borderWidth: 1.15,
                   }
                 : district
-                  ? isActive
+                  ? isFilteredOut
+                    ? {
+                        areaColor: '#f1f5f9',
+                        borderColor: '#e2e8f0',
+                        opacity: 0.35,
+                      }
+                    : isActive
                     ? {
                         borderColor: '#0f172a',
                         borderWidth: 2.25,
                       }
+                    : confirmed
+                      ? {
+                          areaColor: showRealDeserts ? undefined : '#ecfdf5',
+                          borderColor: '#059669',
+                          borderWidth: 1.2,
+                        }
                     : showRealDeserts
                       ? undefined
                       : {
@@ -1041,18 +1346,32 @@ export function OverviewPage() {
                   : `${loadedMap.districts.length.toLocaleString()} districts scored across India`}
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                Showing {visibleFacilities.length.toLocaleString()} coordinate hospital/facility pins.
+                Showing {filteredFacilities.length.toLocaleString()} of {visibleFacilities.length.toLocaleString()} coordinate
+                hospital/facility pins.
+              </p>
+              <p className="mt-1 text-xs text-slate-600">
+                Confirmed evidence exists for {confirmedVisibleDistrictCount.toLocaleString()} district
+                {confirmedVisibleDistrictCount === 1 ? '' : 's'} in this view.
+              </p>
+              <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
+                Pins are discovered records. Turn on Real deserts to color districts by the coordinate-derived shortage
+                signal; use Confirmed to focus on districts with planner-approved evidence rows.
               </p>
             </div>
             <div className="flex flex-col gap-2 md:items-end">
               <div className="flex flex-wrap justify-start gap-2 md:justify-end">
-                <Button
-                  type="button"
-                  variant={showRealDeserts ? 'secondary' : 'outline'}
-                  onClick={() => setShowRealDeserts((current) => !current)}
-                >
-                  Real deserts {showRealDeserts ? 'on' : 'off'}
-                </Button>
+                <MapToggle
+                  checked={showRealDeserts}
+                  label="Real deserts"
+                  description={showRealDeserts ? 'Districts colored by shortage' : 'Pins and boundaries view'}
+                  onChange={() => setShowRealDeserts((current) => !current)}
+                />
+                <MapToggle
+                  checked={confirmedOnly}
+                  label="Confirmed"
+                  description={confirmedOnly ? 'Only planner-confirmed districts' : 'Show all districts'}
+                  onChange={() => setConfirmedOnly((current) => !current)}
+                />
                 {focusedStateKey && (
                   <Button type="button" variant="outline" onClick={returnToCountryView}>
                     <ArrowLeft className="mr-2 h-4 w-4" />
@@ -1079,14 +1398,44 @@ export function OverviewPage() {
             </div>
           </div>
           {pinLegend.length > 0 && (
-            <div className="mb-4 flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p className="font-semibold text-slate-800">
+                  Click {pinModeLabels[pinColorMode].toLowerCase()} chips to filter pins
+                </p>
+                {activePinGroups.length > 0 && (
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-600 transition-colors hover:border-slate-500 hover:text-slate-900"
+                    onClick={() => setActivePinGroups([])}
+                  >
+                    Reset filters
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
               {pinLegend.map((item) => (
-                <span key={item.group} className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-2.5 py-1">
+                <button
+                  key={item.group}
+                  type="button"
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 transition-all ${
+                    activePinGroups.includes(item.group)
+                      ? 'border-slate-950 bg-slate-950 text-white shadow-sm'
+                      : activePinGroups.length > 0
+                        ? 'border-slate-200 bg-white text-slate-400 opacity-60 hover:opacity-100'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-400 hover:text-slate-900'
+                  }`}
+                  onClick={() => togglePinGroup(item.group)}
+                  aria-pressed={activePinGroups.includes(item.group)}
+                >
                   <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                  <span className="font-medium text-slate-800">{item.label}</span>
+                  <span className={activePinGroups.includes(item.group) ? 'font-medium text-white' : 'font-medium'}>
+                    {item.label}
+                  </span>
                   <span>{item.count.toLocaleString()}</span>
-                </span>
+                </button>
               ))}
+              </div>
             </div>
           )}
           <ReactECharts
@@ -1121,45 +1470,56 @@ export function OverviewPage() {
               </div>
 
               <div className="mt-5 grid grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-medium text-slate-500">Coordinate desert</p>
-                  <p className="mt-1 text-3xl font-semibold tabular-nums text-slate-950">
+                <div className={`rounded-2xl border p-3 ${metricCardClass.coordinateDesert}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] opacity-70">Coordinate desert</p>
+                  <p className="mt-1 text-3xl font-semibold tabular-nums">
                     {baseDesertScoreForAccess(selectedDistrict, selectedCoordinateAccess)}
+                    <MetricInfo label="Coordinate desert" detail={metricDetails.coordinateDesert} />
                   </p>
+                  <p className="mt-1 text-[11px] leading-4 opacity-75">{metricDescriptions.coordinateDesert}</p>
                 </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-medium text-slate-500">Evidence-adjusted</p>
-                  <p className="mt-1 text-3xl font-semibold tabular-nums text-slate-950">
+                <div className={`rounded-2xl border p-3 ${metricCardClass.evidenceAdjusted}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] opacity-70">Evidence-adjusted</p>
+                  <p className="mt-1 text-3xl font-semibold tabular-nums">
                     {adjustedDesertScore(selectedDistrict, selectedCoordinateAccess)}
+                    <MetricInfo label="Evidence-adjusted" detail={metricDetails.evidenceAdjusted} />
                   </p>
+                  <p className="mt-1 text-[11px] leading-4 opacity-75">{metricDescriptions.evidenceAdjusted}</p>
                 </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-medium text-slate-500">Coordinate facilities</p>
-                  <p className="mt-1 text-3xl font-semibold tabular-nums text-slate-950">
+                <div className={`rounded-2xl border p-3 ${metricCardClass.coordinateFacilities}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] opacity-70">Coordinate facilities</p>
+                  <p className="mt-1 text-3xl font-semibold tabular-nums">
                     {selectedCoordinateAccess ? selectedCoordinateAccess.facilityCount : '...'}
+                    <MetricInfo label="Coordinate facilities" detail={metricDetails.coordinateFacilities} />
                   </p>
+                  <p className="mt-1 text-[11px] leading-4 opacity-75">{metricDescriptions.coordinateFacilities}</p>
                 </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-medium text-slate-500">Evidence discount</p>
-                  <p className="mt-1 text-3xl font-semibold tabular-nums text-slate-950">
+                <div className={`rounded-2xl border p-3 ${metricCardClass.evidenceDiscount}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] opacity-70">Evidence discount</p>
+                  <p className="mt-1 text-3xl font-semibold tabular-nums">
                     {Math.abs(scoreDelta(selectedDistrict, selectedCoordinateAccess)).toFixed(1)}
+                    <MetricInfo label="Evidence discount" detail={metricDetails.evidenceDiscount} />
                   </p>
+                  <p className="mt-1 text-[11px] leading-4 opacity-75">{metricDescriptions.evidenceDiscount}</p>
                 </div>
               </div>
 
               {selectedCoordinateAccess && (
                 <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-slate-600">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                    <span className="font-semibold text-slate-950">{selectedCoordinateAccess.publicCount}</span> public
+                  <div className={`rounded-xl border px-3 py-2 ${metricCardClass.public}`}>
+                    <span className="font-semibold">{selectedCoordinateAccess.publicCount}</span> public
+                    <p className="mt-1 leading-4 opacity-75">{metricDescriptions.publicPrivate}</p>
                   </div>
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                    <span className="font-semibold text-slate-950">{selectedCoordinateAccess.privateCount}</span> private
+                  <div className={`rounded-xl border px-3 py-2 ${metricCardClass.private}`}>
+                    <span className="font-semibold">{selectedCoordinateAccess.privateCount}</span> private
+                    <p className="mt-1 leading-4 opacity-75">{metricDescriptions.publicPrivate}</p>
                   </div>
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                    <span className="font-semibold text-slate-950">
+                  <div className={`rounded-xl border px-3 py-2 ${metricCardClass.nearest}`}>
+                    <span className="font-semibold">
                       {selectedCoordinateAccess.nearestFacilityDistanceKm ?? 'N/A'}
                     </span>{' '}
                     km nearest
+                    <p className="mt-1 leading-4 opacity-75">{metricDescriptions.nearestKm}</p>
                   </div>
                 </div>
               )}
@@ -1175,14 +1535,74 @@ export function OverviewPage() {
                 </ul>
               </div>
 
-              <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-600">
-                <strong className="text-slate-950">Action:</strong>{' '}
-                {actionLabels[selectedDistrict.recommended_action]}. Treat this as planning support, then verify source
-                records before operational use.
+              <div
+                className={`mt-5 rounded-2xl border p-3 text-sm leading-6 ${actionColorClass(
+                  selectedDistrict.recommended_action
+                )}`}
+              >
+                <strong>Action:</strong> {actionLabels[selectedDistrict.recommended_action]}. Treat this as planning
+                support, then verify source records before operational use.
+                <p className="mt-2 text-xs leading-5 opacity-80">
+                  {actionDescriptions[selectedDistrict.recommended_action]}
+                </p>
+                <div className="mt-3 border-t border-current/20 pt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] opacity-70">Action guide</p>
+                  <div className="mt-2 space-y-1.5">
+                    {(Object.entries(actionLabels) as Array<[keyof typeof actionLabels, string]>).map(([action, label]) => (
+                      <p key={action} className="text-xs leading-5 opacity-85">
+                        <span className={`mr-1 rounded-full border px-2 py-0.5 font-semibold ${actionColorClass(action)}`}>
+                          {label}
+                        </span>
+                        {actionDescriptions[action]}
+                      </p>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
                 Directional planning signal. Verify source records before operational decisions.
+              </div>
+
+              <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-5 text-emerald-950">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">Confirmed evidence</p>
+                    <p className="mt-1 text-emerald-900/80">
+                      Planner-approved evidence rows are append-only and keep the chat history used for confirmation.
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-emerald-300 bg-white px-2.5 py-1 font-semibold">
+                    {selectedConfirmedSummary?.confirmed_count ?? districtContext?.evidenceOverrides.length ?? 0} row
+                    {(selectedConfirmedSummary?.confirmed_count ?? districtContext?.evidenceOverrides.length ?? 0) === 1
+                      ? ''
+                      : 's'}
+                  </span>
+                </div>
+                {selectedConfirmedSummary && (
+                  <p className="mt-2">
+                    Evidence Confidence delta total:{' '}
+                    <span className="font-semibold">
+                      {selectedConfirmedSummary.confidence_delta_total >= 0 ? '+' : ''}
+                      {selectedConfirmedSummary.confidence_delta_total}
+                    </span>
+                  </p>
+                )}
+                {districtContext?.evidenceOverrides.length ? (
+                  <div className="mt-3 space-y-2">
+                    {districtContext.evidenceOverrides.slice(0, 3).map((item) => (
+                      <div key={item.id} className="rounded-xl border border-emerald-200 bg-white px-3 py-2">
+                        <p className="font-semibold">
+                          {item.source_title || item.evidence_type} · {item.confidence_delta >= 0 ? '+' : ''}
+                          {item.confidence_delta}
+                        </p>
+                        <p className="mt-1 line-clamp-3 text-emerald-900/80">{item.summary}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-emerald-900/75">No confirmed evidence has been saved for this district yet.</p>
+                )}
               </div>
 
               <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-950 p-4 text-white">
@@ -1207,36 +1627,40 @@ export function OverviewPage() {
                 {districtContext && (
                   <div className="mt-4 space-y-3">
                     <div className="grid grid-cols-2 gap-2">
-                      <div className="rounded-xl border border-white/10 bg-white/[0.06] p-3">
+                      <div className={`rounded-xl border p-3 ${metricCardClass.facilitiesDark}`}>
                         <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
                           Facility records
                         </p>
                         <p className="mt-1 text-2xl font-semibold tabular-nums">
                           {formatNumber(districtContext.serviceSummary?.facility_record_count ?? selectedDistrict.facility_count)}
                         </p>
+                        <p className="mt-1 text-[11px] leading-4 text-emerald-100/75">{metricDescriptions.facilityRecords}</p>
                       </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.06] p-3">
+                      <div className={`rounded-xl border p-3 ${metricCardClass.ownershipDark}`}>
                         <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Public / private</p>
                         <p className="mt-1 text-sm font-semibold">
                           {formatNumber(districtContext.serviceSummary?.public_government_facility_count)} /{' '}
                           {formatNumber(districtContext.serviceSummary?.private_facility_count)}
                         </p>
+                        <p className="mt-1 text-[11px] leading-4 text-orange-100/75">{metricDescriptions.publicPrivate}</p>
                       </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.06] p-3">
+                      <div className={`rounded-xl border p-3 ${metricCardClass.websites}`}>
                         <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
                           Clean websites
                         </p>
                         <p className="mt-1 text-2xl font-semibold tabular-nums">
                           {formatNumber(districtContext.serviceSummary?.website_clean_count)}
                         </p>
+                        <p className="mt-1 text-[11px] leading-4 text-cyan-100/75">{metricDescriptions.cleanWebsites}</p>
                       </div>
-                      <div className="rounded-xl border border-white/10 bg-white/[0.06] p-3">
+                      <div className={`rounded-xl border p-3 ${metricCardClass.services}`}>
                         <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
                           Service breadth
                         </p>
                         <p className="mt-1 text-2xl font-semibold tabular-nums">
                           {formatNumber(districtContext.serviceSummary?.avg_service_category_count)}
                         </p>
+                        <p className="mt-1 text-[11px] leading-4 text-violet-100/75">{metricDescriptions.serviceBreadth}</p>
                       </div>
                     </div>
 
@@ -1247,7 +1671,7 @@ export function OverviewPage() {
                           {serviceHighlights.map(([service, count]) => (
                             <span
                               key={service}
-                              className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 text-xs text-sky-100"
+                              className="rounded-full border border-violet-300/25 bg-violet-300/10 px-2.5 py-1 text-xs text-violet-100"
                             >
                               {serviceLabel(String(service))}: {formatNumber(count)}
                             </span>
@@ -1336,6 +1760,45 @@ export function OverviewPage() {
                       </div>
                     )}
 
+                    {(chatLoading || agentTrace.length > 0) && (
+                      <div className="rounded-xl border border-white/10 bg-white/[0.06] p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs font-semibold text-slate-200">Agent progress</p>
+                          <span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-slate-300">
+                            {chatLoading ? 'Running' : 'Completed'}
+                          </span>
+                        </div>
+                        <div className="mt-2 space-y-2">
+                          {(agentTrace.length > 0
+                            ? agentTrace
+                            : [
+                                { step: 1, tool: 'evidence_lookup', tool_input: selectedDistrict.district_name },
+                                { step: 2, tool: 'web_search', tool_input: 'official public context if needed' },
+                                { step: 3, tool: 'finish', tool_input: 'compact planning answer' },
+                              ]
+                          ).map((step, index) => (
+                            <div
+                              key={`${step.step ?? index}-${step.tool ?? 'pending'}`}
+                              className={`rounded-lg border px-3 py-2 text-xs leading-5 ${traceToolClass(step.tool)}`}
+                            >
+                              <p className="font-semibold">
+                                Step {step.step ?? index + 1}: {traceToolLabel(step.tool)}
+                              </p>
+                              {step.tool_input && (
+                                <p className="mt-0.5 text-[11px] opacity-75">Input: {String(step.tool_input)}</p>
+                              )}
+                              {step.reason && (
+                                <p className="mt-0.5 text-[11px] opacity-75">Reason: {String(step.reason)}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-2 text-[11px] leading-4 text-slate-400">
+                          Progress shows tool choices and status, not private model reasoning.
+                        </p>
+                      </div>
+                    )}
+
                     <form
                       className="space-y-3"
                       onSubmit={(event) => {
@@ -1358,13 +1821,120 @@ export function OverviewPage() {
                       </Button>
                     </form>
 
+                    <form
+                      className="rounded-xl border border-emerald-300/20 bg-emerald-300/10 p-3"
+                      onSubmit={(event) => {
+                        void confirmLatestEvidence(event);
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold text-emerald-100">Confirm latest evidence</p>
+                          <p className="mt-1 text-[11px] leading-4 text-emerald-100/70">
+                            Saves an auditable Lakebase row with the chat history. It does not overwrite base scores.
+                          </p>
+                        </div>
+                        <span className="rounded-full border border-emerald-200/25 px-2 py-0.5 text-[11px] font-semibold text-emerald-100">
+                          Confirmed
+                        </span>
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-[110px_minmax(0,1fr)]">
+                        <label className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          Delta
+                          <input
+                            type="number"
+                            min="-25"
+                            max="25"
+                            step="1"
+                            value={confirmDelta}
+                            onChange={(event) => setConfirmDelta(event.target.value)}
+                            className="mt-1 w-full rounded-lg border border-white/10 bg-white/[0.08] px-3 py-2 text-sm text-white outline-none focus:border-emerald-200"
+                          />
+                        </label>
+                        <label className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          Source URL
+                          <input
+                            type="url"
+                            value={confirmSourceUrl}
+                            onChange={(event) => setConfirmSourceUrl(event.target.value)}
+                            placeholder="Optional official or web source"
+                            className="mt-1 w-full rounded-lg border border-white/10 bg-white/[0.08] px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-emerald-200"
+                          />
+                        </label>
+                      </div>
+                      <label className="mt-2 block text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                        Source title
+                        <input
+                          type="text"
+                          value={confirmSourceTitle}
+                          onChange={(event) => setConfirmSourceTitle(event.target.value)}
+                          placeholder="Optional short label"
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-white/[0.08] px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-emerald-200"
+                        />
+                      </label>
+                      <label className="mt-2 block text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                        Planner notes
+                        <Textarea
+                          value={confirmNotes}
+                          onChange={(event) => setConfirmNotes(event.target.value)}
+                          className="mt-1 min-h-20 border-white/10 bg-white/[0.08] text-sm text-white placeholder:text-slate-500"
+                          placeholder="Optional reason for accepting this evidence"
+                        />
+                      </label>
+                      {confirmMessage && <p className="mt-2 text-xs text-emerald-100">{confirmMessage}</p>}
+                      {confirmError && <p className="mt-2 text-xs text-amber-200">{confirmError}</p>}
+                      <Button
+                        type="submit"
+                        className="mt-3 w-full bg-emerald-300 text-slate-950 hover:bg-emerald-200"
+                        disabled={confirmSaving || !lastCopilotFinding}
+                      >
+                        {confirmSaving ? 'Saving confirmed evidence…' : 'Confirm and save evidence'}
+                      </Button>
+                      {!lastCopilotFinding && (
+                        <p className="mt-2 text-[11px] leading-4 text-slate-400">
+                          Ask the district copilot first, then confirm the answer if the evidence should be written back.
+                        </p>
+                      )}
+                    </form>
+
                     <p className="text-[11px] leading-4 text-slate-400">{districtContext.sourceNote}</p>
                   </div>
                 )}
               </div>
             </>
           ) : (
-            <p className="text-sm leading-6 text-slate-600">Click a district to explain the before/after change.</p>
+            <div className="space-y-4">
+              <p className="text-sm leading-6 text-slate-600">
+                Click a district to open its decision audit, metric explanations, action class, and district copilot.
+              </p>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Metric guide</p>
+                <div className="mt-3 space-y-2 text-xs leading-5">
+                  <p className={`rounded-xl border px-3 py-2 ${metricCardClass.coordinateDesert}`}>
+                    <span className="font-semibold">Coordinate desert:</span>{' '}
+                    {metricDescriptions.coordinateDesert}
+                  </p>
+                  <p className={`rounded-xl border px-3 py-2 ${metricCardClass.evidenceAdjusted}`}>
+                    <span className="font-semibold">Evidence-adjusted:</span>{' '}
+                    {metricDescriptions.evidenceAdjusted}
+                  </p>
+                  <p className={`rounded-xl border px-3 py-2 ${metricCardClass.evidenceDiscount}`}>
+                    <span className="font-semibold">Evidence discount:</span>{' '}
+                    {metricDescriptions.evidenceDiscount}
+                  </p>
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Action guide</p>
+                <div className="mt-3 space-y-2">
+                  {(Object.entries(actionLabels) as Array<[keyof typeof actionLabels, string]>).map(([action, label]) => (
+                    <p key={action} className={`rounded-xl border px-3 py-2 text-xs leading-5 ${actionColorClass(action)}`}>
+                      <span className="font-semibold">{label}:</span> {actionDescriptions[action]}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </div>
           )}
         </aside>
       </div>

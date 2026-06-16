@@ -245,11 +245,46 @@ export interface DistrictFacilityService {
   service_categories: string | null;
 }
 
+export type DistrictEvidenceOverrideType =
+  | 'copilot_web_verification'
+  | 'official_registry'
+  | 'facility_website'
+  | 'planner_note';
+
+export interface DistrictEvidenceOverride {
+  id: string;
+  state_key: string;
+  district_key: string;
+  evidence_type: DistrictEvidenceOverrideType;
+  source_url: string;
+  source_title: string;
+  summary: string;
+  confidence_delta: number;
+  status: 'confirmed' | 'rejected' | 'superseded';
+  confirmed_by: string;
+  confirmed_at: string;
+  chat_history: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }>;
+  notes: string;
+  created_at: string;
+}
+
+export interface DistrictEvidenceOverrideSummary {
+  state_key: string;
+  district_key: string;
+  confirmed_count: number;
+  confidence_delta_total: number;
+  latest_confirmed_at: string;
+}
+
 export interface DistrictContextResponse {
   district: DistrictPriority;
   healthProfile: DistrictHealthProfile | null;
   serviceSummary: DistrictServiceSummary | null;
   facilities: DistrictFacilityService[];
+  evidenceOverrides: DistrictEvidenceOverride[];
   sourceNote: string;
 }
 
@@ -293,6 +328,14 @@ export interface CopilotResponse {
   trust: {
     model: string;
     modelExecution: string;
+    agentMode?: string;
+    agentTools?: string[];
+    agentTrace?: Array<{
+      step?: number;
+      tool?: string;
+      tool_input?: string;
+      reason?: string;
+    }>;
     dataExecution: string;
     retrieval: string;
   };
