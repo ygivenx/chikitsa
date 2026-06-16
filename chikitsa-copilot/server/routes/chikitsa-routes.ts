@@ -1,4 +1,7 @@
 import type { Application, Request } from 'express';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 
 interface QueryResult {
@@ -26,6 +29,14 @@ interface ChikitsaAppKit {
   serving(): ServingHandle;
 }
 
+interface DistrictAgentResult {
+  answer?: string;
+  model?: string;
+  mode?: string;
+  used_tools?: string[];
+  trace?: Array<Record<string, unknown>>;
+}
+
 const CreateInterventionBody = z.object({
   title: z.string().trim().min(3).max(160),
   state: z.string().trim().min(1).max(100),
@@ -46,6 +57,29 @@ const CopilotBody = z.object({
   question: z.string().trim().min(8).max(1200),
   state: z.string().trim().max(100).optional(),
   district: z.string().trim().max(100).optional(),
+});
+
+const CreateEvidenceOverrideBody = z.object({
+  state_key: z.string().trim().min(1).max(120),
+  district_key: z.string().trim().min(1).max(160),
+  evidence_type: z
+    .enum(['copilot_web_verification', 'official_registry', 'facility_website', 'planner_note'])
+    .default('copilot_web_verification'),
+  source_url: z.string().trim().url().max(1000).optional().or(z.literal('')).default(''),
+  source_title: z.string().trim().max(240).optional().default(''),
+  summary: z.string().trim().min(10).max(4000),
+  confidence_delta: z.number().min(-25).max(25).default(5),
+  notes: z.string().trim().max(2000).optional().default(''),
+  chat_history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().trim().min(1).max(4000),
+      })
+    )
+    .max(12)
+    .optional()
+    .default([]),
 });
 
 const SETUP_SCHEMA_SQL = `CREATE SCHEMA IF NOT EXISTS chikitsa_app`;
@@ -90,26 +124,56 @@ const CREATE_EXTERNAL_MATCH_SQL = `
   )
 `;
 
+const CREATE_EVIDENCE_OVERRIDES_SQL = `
+  CREATE TABLE IF NOT EXISTS chikitsa_app.district_evidence_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    state_key TEXT NOT NULL,
+    district_key TEXT NOT NULL,
+    evidence_type TEXT NOT NULL DEFAULT 'copilot_web_verification'
+      CHECK (evidence_type IN ('copilot_web_verification', 'official_registry', 'facility_website', 'planner_note')),
+    source_url TEXT NOT NULL DEFAULT '',
+    source_title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL,
+    confidence_delta DOUBLE PRECISION NOT NULL DEFAULT 0
+      CHECK (confidence_delta >= -25 AND confidence_delta <= 25),
+    status TEXT NOT NULL DEFAULT 'confirmed'
+      CHECK (status IN ('confirmed', 'rejected', 'superseded')),
+    confirmed_by TEXT NOT NULL DEFAULT '',
+    confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    chat_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`;
+
+const ALTER_EVIDENCE_OVERRIDES_CHAT_HISTORY_SQL = `
+  ALTER TABLE chikitsa_app.district_evidence_overrides
+  ADD COLUMN IF NOT EXISTS chat_history JSONB NOT NULL DEFAULT '[]'::jsonb
+`;
+
 const DISTRICT_RANKING_SQL = `
   WITH facility_by_district AS (
     SELECT
       p.state_key,
       p.district_key,
-      COUNT(DISTINCT f.facility_id)::INT AS facility_count,
-      ROUND(AVG(f.completeness_score)::NUMERIC, 2) AS avg_completeness_score,
-      SUM(
+      COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END)::INT AS facility_count,
+      COUNT(DISTINCT f.facility_id)::INT AS pin_matched_facility_count,
+      COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END)::INT AS unambiguous_pin_facility_count,
+      ROUND(AVG(CASE WHEN p.is_unambiguous THEN f.completeness_score END)::NUMERIC, 2) AS avg_completeness_score,
+      COUNT(DISTINCT
         CASE
-          WHEN f.coordinate_quality <> 'plausible_india'
-            OR f.capacity_outlier_flag
-            OR f.pincode_quality <> 'valid_format'
-          THEN 1
-          ELSE 0
+          WHEN p.is_unambiguous
+            AND (
+              f.coordinate_quality <> 'plausible_india'
+              OR f.capacity_outlier_flag
+              OR f.pincode_quality <> 'valid_format'
+            )
+          THEN f.facility_id
         END
       )::INT AS flagged_facility_count
     FROM public.facilities_curated f
     JOIN public.pincode_geography p
       ON f.pincode = p.pincode::TEXT
-      AND p.is_unambiguous = true
     GROUP BY p.state_key, p.district_key
   ),
   scored AS (
@@ -119,6 +183,8 @@ const DISTRICT_RANKING_SQL = `
       d.district_name,
       d.district_key,
       COALESCE(f.facility_count, 0) AS facility_count,
+      COALESCE(f.pin_matched_facility_count, 0) AS pin_matched_facility_count,
+      COALESCE(f.unambiguous_pin_facility_count, 0) AS unambiguous_pin_facility_count,
       COALESCE(f.flagged_facility_count, 0) AS flagged_facility_count,
       d.child_anaemia_pct,
       d.child_underweight_pct,
@@ -137,6 +203,12 @@ const DISTRICT_RANKING_SQL = `
       ROUND(GREATEST(0, LEAST(100,
         (COALESCE(f.avg_completeness_score, 0) / 7.0 * 100)
         - (COALESCE(f.flagged_facility_count, 0)::NUMERIC / GREATEST(COALESCE(f.facility_count, 0), 1) * 30)
+        - (
+          GREATEST(
+            COALESCE(f.pin_matched_facility_count, 0) - COALESCE(f.unambiguous_pin_facility_count, 0),
+            0
+          )::NUMERIC / GREATEST(COALESCE(f.pin_matched_facility_count, 0), 1) * 20
+        )
         - CASE WHEN d.contains_caution_estimate THEN 8 ELSE 0 END
         - CASE WHEN d.contains_suppressed_value THEN 15 ELSE 0 END
       ))::NUMERIC, 1)::DOUBLE PRECISION AS evidence_trust_score
@@ -153,6 +225,9 @@ const DISTRICT_RANKING_SQL = `
     ROUND((health_need_score * facility_scarcity_score / 100)::NUMERIC, 1)::DOUBLE PRECISION AS desert_score,
     ROUND((health_need_score * facility_scarcity_score / 100 * (0.65 + evidence_trust_score / 100 * 0.35))::NUMERIC, 1)
       ::DOUBLE PRECISION AS trust_adjusted_score,
+    ROUND(GREATEST(0, LEAST(100, facility_scarcity_score))::NUMERIC, 1)::DOUBLE PRECISION AS desert_area_pct,
+    ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (0.65 + evidence_trust_score / 100 * 0.35)))::NUMERIC, 1)
+      ::DOUBLE PRECISION AS desert_area_pct_trust_adjusted,
     CASE
       WHEN evidence_trust_score < 45 THEN 'verify'
       WHEN health_need_score >= 60 AND facility_scarcity_score >= 70 THEN 'build'
@@ -230,6 +305,57 @@ function extractModelContent(response: unknown): string {
   return JSON.stringify(response);
 }
 
+function runDistrictAgent(payload: Record<string, unknown>) {
+  return new Promise<DistrictAgentResult>((resolve, reject) => {
+    const scriptPath = path.join(process.cwd(), 'server', 'agents', 'district_copilot_agent.py');
+    if (!existsSync(scriptPath)) {
+      reject(new Error(`District agent script not found at ${scriptPath}`));
+      return;
+    }
+
+    const pythonExecutable = process.env.PYTHON_BIN || process.env.PYTHON || 'python3';
+    const child = spawn(pythonExecutable, [scriptPath], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('District agent timed out.'));
+    }, 60000);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(stderr || `District agent exited with code ${code}.`));
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(stdout) as DistrictAgentResult);
+      } catch {
+        reject(new Error(`District agent returned invalid JSON: ${stdout.slice(0, 500)}`));
+      }
+    });
+
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  });
+}
+
 function parseLimit(value: unknown, fallback: number, maximum: number) {
   const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number.NaN;
   return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), maximum) : fallback;
@@ -238,7 +364,24 @@ function parseLimit(value: unknown, fallback: number, maximum: number) {
 function parseStateKey(value: unknown) {
   if (typeof value !== 'string') return null;
   const stateKey = value.trim().toLowerCase();
-  return /^[a-z0-9][a-z0-9 _-]{0,120}$/.test(stateKey) ? stateKey : null;
+  return /^[a-z0-9][a-z0-9 _&-]{0,120}$/.test(stateKey) ? stateKey : null;
+}
+
+const facilityStateKeyAliases: Record<string, string[]> = {
+  maharastra: ['maharashtra'],
+  maharashtra: ['maharastra'],
+  'nct of delhi': ['delhi'],
+  delhi: ['nct of delhi'],
+  'jammu & kashmir': ['jammu and kashmir'],
+  'jammu and kashmir': ['jammu & kashmir'],
+  'andaman & nicobar islands': ['andaman and nicobar islands'],
+  'andaman and nicobar islands': ['andaman & nicobar islands'],
+  'dadra and nagar haveli & daman and diu': ['dadra and nagar haveli and daman and diu'],
+  'dadra and nagar haveli and daman and diu': ['dadra and nagar haveli & daman and diu'],
+};
+
+function expandFacilityStateKeys(stateKey: string) {
+  return Array.from(new Set([stateKey, ...(facilityStateKeyAliases[stateKey] ?? [])]));
 }
 
 function toNumber(value: unknown, fallback = 0) {
@@ -261,6 +404,15 @@ async function queryWithFallback(
   }
 }
 
+async function optionalQuery(appkit: ChikitsaAppKit, sql: string, params: unknown[] = []) {
+  try {
+    return await appkit.lakebase.query(sql, params);
+  } catch (error) {
+    console.warn('[chikitsa] Optional evidence query skipped:', error instanceof Error ? error.message : String(error));
+    return { rows: [] };
+  }
+}
+
 function findPayloadWithChoices(value: unknown, depth = 0): (Record<string, unknown> & { choices: unknown[] }) | null {
   if (!isRecord(value) || depth > 6) return null;
   if (Array.isArray(value.choices)) return { ...value, choices: value.choices };
@@ -279,6 +431,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
     ['interventions', CREATE_INTERVENTIONS_SQL],
     ['intervention action migration', ALTER_INTERVENTIONS_ACTION_SQL],
     ['external match', CREATE_EXTERNAL_MATCH_SQL],
+    ['district evidence overrides', CREATE_EVIDENCE_OVERRIDES_SQL],
+    ['district evidence override chat history migration', ALTER_EVIDENCE_OVERRIDES_CHAT_HISTORY_SQL],
   ] as const) {
     try {
       await appkit.lakebase.query(sql);
@@ -364,6 +518,284 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       } catch (error) {
         console.error('[chikitsa] Failed to list districts:', error);
         res.status(500).json({ error: 'Failed to load district priorities.' });
+      }
+    });
+
+    app.get('/api/district-context', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+      const district = typeof req.query.district === 'string' ? req.query.district.trim().toLowerCase() : '';
+
+      if (!state || !district) {
+        res.status(400).json({ error: 'state and district are required.' });
+        return;
+      }
+
+      try {
+        const [districtEvidence, healthProfile, serviceSummary, facilities, evidenceOverrides] = await Promise.all([
+          queryWithFallback(
+            appkit,
+            `${PLANNING_SIGNALS_SELECT_SQL}
+             WHERE state_key = $1 AND district_key = $2
+             LIMIT 1`,
+            `${DISTRICT_RANKING_SQL}
+             WHERE state_key = $1 AND district_key = $2
+             LIMIT 1`,
+            [state, district]
+          ),
+          appkit.lakebase.query(
+            `
+              SELECT
+                state_name,
+                state_key,
+                district_name,
+                district_key,
+                households_surveyed,
+                women_interviewed,
+                men_interviewed,
+                health_insurance_pct,
+                improved_sanitation_pct,
+                four_anc_visits_pct,
+                institutional_birth_pct,
+                child_fully_vaccinated_pct,
+                child_stunted_pct,
+                child_wasted_pct,
+                child_underweight_pct,
+                child_anaemia_pct,
+                women_anaemia_pct,
+                women_high_blood_pressure_pct,
+                men_high_blood_pressure_pct,
+                women_high_blood_sugar_pct,
+                men_high_blood_sugar_pct,
+                cervical_screening_pct,
+                breast_exam_pct,
+                contains_caution_estimate,
+                contains_suppressed_value,
+                source_period
+              FROM public.district_health_profiles
+              WHERE state_key = $1 AND district_key = $2
+              LIMIT 1
+            `,
+            [state, district]
+          ),
+          optionalQuery(
+            appkit,
+            `
+              SELECT *
+              FROM public.district_facility_service_summary
+              WHERE state_key = $1 AND district_key = $2
+              LIMIT 1
+            `,
+            [state, district]
+          ),
+          optionalQuery(
+            appkit,
+            `
+              SELECT
+                f.facility_id,
+                f.name,
+                f.facility_type_clean,
+                f.operator_group,
+                f.city,
+                f.pincode,
+                f.coordinate_quality,
+                f.doctor_count,
+                f.reported_capacity,
+                f.website_quality,
+                f.service_categories
+              FROM public.facility_cleaned_services f
+              JOIN public.pincode_geography p
+                ON f.pincode = p.pincode::TEXT
+                AND p.is_unambiguous
+              WHERE p.state_key = $1
+                AND p.district_key = $2
+                AND f.is_valid_facility_id
+              ORDER BY
+                CASE f.operator_group WHEN 'public_government' THEN 1 WHEN 'private' THEN 2 ELSE 3 END,
+                f.service_category_count DESC,
+                f.name
+              LIMIT 8
+            `,
+            [state, district]
+          ),
+          optionalQuery(
+            appkit,
+            `
+              SELECT
+                id,
+                state_key,
+                district_key,
+                evidence_type,
+                source_url,
+                source_title,
+                summary,
+                confidence_delta,
+                status,
+                confirmed_by,
+                confirmed_at,
+                chat_history,
+                notes,
+                created_at
+              FROM chikitsa_app.district_evidence_overrides
+              WHERE state_key = $1
+                AND district_key = $2
+                AND status = 'confirmed'
+              ORDER BY confirmed_at DESC
+              LIMIT 20
+            `,
+            [state, district]
+          ),
+        ]);
+
+        if (districtEvidence.rows.length === 0) {
+          res.status(404).json({ error: 'District evidence was not found.' });
+          return;
+        }
+
+        res.json({
+          district: districtEvidence.rows[0],
+          healthProfile: healthProfile.rows[0] ?? null,
+          serviceSummary: serviceSummary.rows[0] ?? null,
+          facilities: facilities.rows,
+          evidenceOverrides: evidenceOverrides.rows,
+          sourceNote:
+            'NFHS-5 2019-2021 district attributes and discovered marketplace facility records. Facility service categories are text-derived mentions, not verified clinical service availability.',
+        });
+      } catch (error) {
+        console.error('[chikitsa] Failed to load district context:', error);
+        res.status(500).json({ error: 'Failed to load district context.' });
+      }
+    });
+
+    app.get('/api/evidence-overrides/summary', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            SELECT
+              state_key,
+              district_key,
+              COUNT(*)::INT AS confirmed_count,
+              ROUND(SUM(confidence_delta)::NUMERIC, 1)::DOUBLE PRECISION AS confidence_delta_total,
+              MAX(confirmed_at) AS latest_confirmed_at
+            FROM chikitsa_app.district_evidence_overrides
+            WHERE status = 'confirmed'
+              AND ($1 = '' OR state_key = $1)
+            GROUP BY state_key, district_key
+            ORDER BY latest_confirmed_at DESC
+          `,
+          [state]
+        );
+        res.json(result.rows);
+      } catch (error) {
+        console.error('[chikitsa] Failed to load evidence override summary:', error);
+        res.status(500).json({ error: 'Failed to load confirmed evidence summary.' });
+      }
+    });
+
+    app.get('/api/evidence-overrides', async (req, res) => {
+      const state = typeof req.query.state === 'string' ? req.query.state.trim().toLowerCase() : '';
+      const district = typeof req.query.district === 'string' ? req.query.district.trim().toLowerCase() : '';
+
+      if (!state || !district) {
+        res.status(400).json({ error: 'state and district are required.' });
+        return;
+      }
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            SELECT
+              id,
+              state_key,
+              district_key,
+              evidence_type,
+              source_url,
+              source_title,
+              summary,
+              confidence_delta,
+              status,
+              confirmed_by,
+              confirmed_at,
+              chat_history,
+              notes,
+              created_at
+            FROM chikitsa_app.district_evidence_overrides
+            WHERE state_key = $1
+              AND district_key = $2
+              AND status = 'confirmed'
+            ORDER BY confirmed_at DESC
+            LIMIT 50
+          `,
+          [state, district]
+        );
+        res.json(result.rows);
+      } catch (error) {
+        console.error('[chikitsa] Failed to load evidence overrides:', error);
+        res.status(500).json({ error: 'Failed to load evidence overrides.' });
+      }
+    });
+
+    app.post('/api/evidence-overrides', async (req, res) => {
+      const parsed = CreateEvidenceOverrideBody.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid evidence override.', details: parsed.error.flatten() });
+        return;
+      }
+
+      const value = parsed.data;
+      const confirmedBy = req.header('x-forwarded-email') ?? req.header('x-forwarded-user') ?? 'Local developer';
+
+      try {
+        const result = await appkit.lakebase.query(
+          `
+            INSERT INTO chikitsa_app.district_evidence_overrides
+              (
+                state_key,
+                district_key,
+                evidence_type,
+                source_url,
+                source_title,
+                summary,
+                confidence_delta,
+                confirmed_by,
+                chat_history,
+                notes
+              )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+            RETURNING
+              id,
+              state_key,
+              district_key,
+              evidence_type,
+              source_url,
+              source_title,
+              summary,
+              confidence_delta,
+              status,
+              confirmed_by,
+              confirmed_at,
+              chat_history,
+              notes,
+              created_at
+          `,
+          [
+            value.state_key.trim().toLowerCase(),
+            value.district_key.trim().toLowerCase(),
+            value.evidence_type,
+            value.source_url,
+            value.source_title,
+            value.summary,
+            value.confidence_delta,
+            confirmedBy,
+            JSON.stringify(value.chat_history),
+            value.notes,
+          ]
+        );
+        res.status(201).json(result.rows[0]);
+      } catch (error) {
+        console.error('[chikitsa] Failed to create evidence override:', error);
+        res.status(500).json({ error: 'Failed to confirm evidence override.' });
       }
     });
 
@@ -545,7 +977,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             SELECT
               district_key AS h3_index,
               facility_scarcity_score < 50 AS is_covered,
-              trust_adjusted_score < desert_score AS is_covered_trust_adjusted,
+              (facility_scarcity_score * (0.65 + evidence_trust_score / 100 * 0.35)) < 50
+                AS is_covered_trust_adjusted,
               NULL::DOUBLE PRECISION AS population,
               NULL::DOUBLE PRECISION AS nearest_facility_distance_km,
               district_key
@@ -595,13 +1028,43 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
         res.status(400).json({ error: 'Invalid state key.' });
         return;
       }
+      const limit = parseLimit(req.query.limit, 10000, 50000);
+      const facilityStateKeys = expandFacilityStateKeys(stateKey);
 
       try {
-        const result = await appkit.lakebase.query(
+        const result = await queryWithFallback(
+          appkit,
           `
             SELECT
               facility_id,
               name,
+              facility_type_clean AS facility_type,
+              latitude,
+              longitude,
+              CASE operator_group
+                WHEN 'public_government' THEN 'public'
+                WHEN 'private' THEN 'private'
+                ELSE 'unknown'
+              END AS operator_type,
+              city,
+              pincode,
+              website_quality,
+              service_categories,
+              false AS places_matched
+            FROM public.facility_cleaned_services
+            WHERE state_key = ANY($1::TEXT[])
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND coordinate_quality = 'plausible_india'
+              AND is_valid_facility_id
+            ORDER BY name
+            LIMIT $2
+          `,
+          `
+            SELECT
+              facility_id,
+              name,
+              facility_type,
               latitude,
               longitude,
               CASE
@@ -609,16 +1072,20 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
                 WHEN LOWER(COALESCE(operator_type, '')) LIKE '%private%' THEN 'private'
                 ELSE 'unknown'
               END AS operator_type,
+              city,
+              pincode,
+              NULL::TEXT AS website_quality,
+              NULL::TEXT AS service_categories,
               false AS places_matched
             FROM public.facilities_curated
-            WHERE state_key = $1
+            WHERE state_key = ANY($1::TEXT[])
               AND latitude IS NOT NULL
               AND longitude IS NOT NULL
               AND coordinate_quality = 'plausible_india'
             ORDER BY name
-            LIMIT 5000
+            LIMIT $2
           `,
-          [stateKey],
+          [facilityStateKeys, limit]
         );
         res.json(result.rows);
       } catch (error) {
@@ -812,7 +1279,15 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
       const facilitySampleLimit = districtKey ? 25 : 20;
 
       try {
-        const [districtEvidence, facilitySummary, facilitySamples, qualityEvidence] = await Promise.all([
+        const [
+          districtEvidence,
+          facilitySummary,
+          facilitySamples,
+          publicFacilityDetails,
+          healthProfile,
+          serviceSummary,
+          qualityEvidence,
+        ] = await Promise.all([
           queryWithFallback(
             appkit,
             `${PLANNING_SIGNALS_SELECT_SQL}
@@ -878,6 +1353,100 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             `,
             [stateKey, districtKey, facilitySampleLimit]
           ),
+          districtKey
+            ? optionalQuery(
+                appkit,
+                `
+                  SELECT
+                    f.facility_id,
+                    f.name,
+                    f.facility_type_clean,
+                    f.operator_group,
+                    f.city,
+                    f.state_or_region,
+                    p.district_name,
+                    p.state_name,
+                    f.pincode,
+                    f.latitude,
+                    f.longitude,
+                    f.coordinate_quality,
+                    f.pincode_quality,
+                    f.capacity_outlier_flag,
+                    f.completeness_score,
+                    f.doctor_count,
+                    f.reported_capacity,
+                    f.website_url_clean,
+                    f.website_quality,
+                    f.has_source_urls,
+                    f.service_categories,
+                    f.service_signal_quality
+                  FROM public.facility_cleaned_services f
+                  JOIN public.pincode_geography p
+                    ON f.pincode = p.pincode::TEXT
+                    AND p.is_unambiguous
+                  WHERE p.state_key = $1
+                    AND p.district_key = $2
+                    AND f.operator_group = 'public_government'
+                    AND f.is_valid_facility_id
+                  ORDER BY
+                    f.service_category_count DESC,
+                    f.website_signal_score DESC,
+                    f.completeness_score DESC,
+                    f.name
+                  LIMIT 12
+                `,
+                [stateKey, districtKey]
+              )
+            : Promise.resolve({ rows: [] }),
+          districtKey
+            ? appkit.lakebase.query(
+                `
+                  SELECT
+                    state_name,
+                    state_key,
+                    district_name,
+                    district_key,
+                    households_surveyed,
+                    women_interviewed,
+                    men_interviewed,
+                    health_insurance_pct,
+                    improved_sanitation_pct,
+                    four_anc_visits_pct,
+                    institutional_birth_pct,
+                    child_fully_vaccinated_pct,
+                    child_stunted_pct,
+                    child_wasted_pct,
+                    child_underweight_pct,
+                    child_anaemia_pct,
+                    women_anaemia_pct,
+                    women_high_blood_pressure_pct,
+                    men_high_blood_pressure_pct,
+                    women_high_blood_sugar_pct,
+                    men_high_blood_sugar_pct,
+                    cervical_screening_pct,
+                    breast_exam_pct,
+                    contains_caution_estimate,
+                    contains_suppressed_value,
+                    source_period
+                  FROM public.district_health_profiles
+                  WHERE state_key = $1 AND district_key = $2
+                  LIMIT 1
+                `,
+                [stateKey, districtKey]
+              )
+            : Promise.resolve({ rows: [] }),
+          districtKey
+            ? optionalQuery(
+                appkit,
+                `
+                  SELECT *
+                  FROM public.district_facility_service_summary
+                  WHERE state_key = $1 AND district_key = $2
+                  LIMIT 1
+                `,
+                [stateKey, districtKey]
+              )
+            : Promise.resolve({ rows: [] }),
           appkit.lakebase.query(
             `
             SELECT
@@ -902,6 +1471,9 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           districts: districtEvidence.rows,
           facilitySummaryByDistrict: facilitySummary.rows,
           facilitySamples: facilitySamples.rows,
+          publicFacilityDetails: publicFacilityDetails.rows,
+          healthProfile: healthProfile.rows[0] ?? null,
+          serviceSummary: serviceSummary.rows[0] ?? null,
           quality: qualityEvidence.rows[0],
           sourcePeriod: 'NFHS-5 (2019-2021) and a marketplace facility snapshot',
           retrievalScope: {
@@ -911,11 +1483,12 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             districtRowLimit: districtLimit,
             districtCoverage:
               districtKey || stateKey
-                ? 'complete for requested state or district, up to the configured safety limit'
+                ? 'all matching district score rows returned for the requested state or district, up to the configured safety limit'
                 : 'national ranking capped for prompt size',
             facilitySummaryRowsReturned: facilitySummary.rows.length,
             facilityExampleRowsReturned: facilitySamples.rows.length,
             facilityExampleLimit: facilitySampleLimit,
+            publicFacilityDetailRowsReturned: publicFacilityDetails.rows.length,
           },
         };
 
@@ -927,6 +1500,10 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'Do not use the phrase "complete coverage" in the final answer.',
           'The districts array is the authoritative ranked district evidence for the requested scope.',
           'Use facilitySummaryByDistrict for facility count, coordinate quality, capacity flag, completeness, and ambiguous PIN evidence.',
+          'When healthProfile is present, use it for NFHS district population-survey attributes and health burden indicators. Do not call these current population counts.',
+          'When serviceSummary is present, use it for discovered hospital ownership mix, cleaned website evidence, and text-derived service mentions. State that service mentions are not verified clinical availability.',
+          'When publicFacilityDetails is present and the user asks for public hospital/facility data or details, answer from publicFacilityDetails directly. Name the facilities and include city, PIN, website quality, coordinate quality, and service categories when available.',
+          'If publicFacilityDetails has rows, do not say the evidence does not identify the public facilities.',
           'The facilitySamples array contains example facility records for QA only; do not summarize it as coverage.',
           'Do not mention sample limits in the final answer unless a specific example record creates a data-quality caveat.',
           'Use retrievalScope when describing district coverage or evidence reviewed.',
@@ -934,29 +1511,61 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
           'When present, cite desert_area_pct, desert_area_pct_trust_adjusted, and the named trust components driving the action class.',
           'Classify the recommended action as exactly one of: Build, Verify, Upgrade, Improve access, Investigate.',
           'Do not provide medical diagnosis or individual treatment advice.',
-          'Return concise sections: Finding, Recommended action, Evidence, Data quality caveats, Next verification steps.',
+          'Keep planning answers short: maximum 140 words.',
+          'If the user asks to show, list, or provide details for hospitals/facilities, use a facility-list answer instead: maximum 220 words.',
+          'Use compact markdown only. No tables unless the user explicitly asks for a table.',
+          'For planning questions, return exactly this structure:',
+          '**Action:** one of Build, Verify, Upgrade, Improve access, Investigate.',
+          '**Why:** one sentence.',
+          '**Evidence:** three bullets maximum.',
+          '**Caveat:** one bullet maximum.',
+          '**Next step:** one sentence.',
+          'For facility-list questions, return exactly this structure instead:',
+          '**Public facilities found:** bullets with facility name, type, city/PIN, website quality, coordinate quality, and service categories when available.',
+          '**Caveat:** one sentence about discovered snapshot evidence and service mentions.',
+          '**Next step:** one sentence about official validation.',
           `Question: ${question}`,
           `Evidence JSON: ${JSON.stringify(evidence)}`,
         ].join('\n\n');
 
-        const modelResponse = await appkit
-          .serving()
-          .asUser(req)
-          .invoke({
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: 3000,
-            reasoning_effort: 'low',
-            temperature: 0.2,
+        let answer: string;
+        let agentResult: DistrictAgentResult | null = null;
+        let modelExecution = 'Plain Python ReAct agent';
+        try {
+          agentResult = await runDistrictAgent({
+            question,
+            evidence,
           });
+          answer = agentResult.answer || 'The district copilot did not return an answer.';
+        } catch (agentError) {
+          console.warn(
+            '[chikitsa] Python district agent failed; falling back to direct AppKit serving:',
+            agentError instanceof Error ? agentError.message : agentError
+          );
+          const modelResponse = await appkit
+            .serving()
+            .asUser(req)
+            .invoke({
+              messages: [{ role: 'user', content: prompt }],
+              max_tokens: 850,
+              reasoning_effort: 'low',
+              temperature: 0.2,
+            });
+          answer = extractModelContent(modelResponse);
+          modelExecution = 'Authenticated user (OBO) direct AppKit fallback';
+        }
 
         res.json({
-          answer: extractModelContent(modelResponse),
+          answer,
           evidence,
           trust: {
-            model: 'chatgpt',
-            modelExecution: 'Authenticated user (OBO)',
+            model: agentResult?.model ?? 'chatgpt',
+            modelExecution,
+            agentMode: agentResult?.mode ?? 'direct-fallback',
+            agentTools: agentResult?.used_tools ?? [],
+            agentTrace: agentResult?.trace ?? [],
             dataExecution: 'App service principal',
-            retrieval: 'Deterministic server-side SQL; the model does not generate or execute SQL',
+            retrieval: 'Deterministic server-side SQL; the agent does not generate or execute SQL',
           },
         });
       } catch (error) {

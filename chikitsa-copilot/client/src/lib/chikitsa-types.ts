@@ -114,9 +114,14 @@ export interface StateCoverageResponse {
 export interface StateFacility {
   facility_id: string;
   name: string;
+  facility_type: string | null;
   latitude: number;
   longitude: number;
   operator_type: 'public' | 'private' | 'unknown' | null;
+  city?: string | null;
+  pincode?: string | null;
+  website_quality?: string | null;
+  service_categories?: string | null;
   places_matched: boolean;
 }
 
@@ -168,6 +173,121 @@ export interface Facility {
   is_unambiguous: boolean | null;
 }
 
+export interface DistrictHealthProfile {
+  state_name: string;
+  state_key: string;
+  district_name: string;
+  district_key: string;
+  households_surveyed: number | null;
+  women_interviewed: number | null;
+  men_interviewed: number | null;
+  health_insurance_pct: number | null;
+  improved_sanitation_pct: number | null;
+  four_anc_visits_pct: number | null;
+  institutional_birth_pct: number | null;
+  child_fully_vaccinated_pct: number | null;
+  child_stunted_pct: number | null;
+  child_wasted_pct: number | null;
+  child_underweight_pct: number | null;
+  child_anaemia_pct: number | null;
+  women_anaemia_pct: number | null;
+  women_high_blood_pressure_pct: number | null;
+  men_high_blood_pressure_pct: number | null;
+  women_high_blood_sugar_pct: number | null;
+  men_high_blood_sugar_pct: number | null;
+  cervical_screening_pct: number | null;
+  breast_exam_pct: number | null;
+  contains_caution_estimate: boolean;
+  contains_suppressed_value: boolean;
+  source_period: string;
+}
+
+export interface DistrictServiceSummary {
+  state_name: string;
+  state_key: string;
+  district_name: string;
+  district_key: string;
+  facility_record_count: number;
+  public_government_facility_count: number;
+  private_facility_count: number;
+  unknown_operator_facility_count: number;
+  website_clean_count: number;
+  website_url_like_count: number;
+  website_domain_only_count: number;
+  website_third_party_or_generic_count: number;
+  source_url_count: number;
+  service_maternal_child_count: number;
+  service_emergency_critical_count: number;
+  service_diagnostics_count: number;
+  service_cardiac_count: number;
+  service_diabetes_endocrine_count: number;
+  service_renal_count: number;
+  service_oncology_count: number;
+  service_eye_care_count: number;
+  service_dental_count: number;
+  service_surgery_orthopedic_count: number;
+  avg_website_signal_score: number | null;
+  avg_service_category_count: number | null;
+  layer_version: string;
+}
+
+export interface DistrictFacilityService {
+  facility_id: string;
+  name: string | null;
+  facility_type_clean: string | null;
+  operator_group: string | null;
+  city: string | null;
+  pincode: string | null;
+  coordinate_quality: string;
+  doctor_count: number | null;
+  reported_capacity: number | null;
+  website_quality: string | null;
+  service_categories: string | null;
+}
+
+export type DistrictEvidenceOverrideType =
+  | 'copilot_web_verification'
+  | 'official_registry'
+  | 'facility_website'
+  | 'planner_note';
+
+export interface DistrictEvidenceOverride {
+  id: string;
+  state_key: string;
+  district_key: string;
+  evidence_type: DistrictEvidenceOverrideType;
+  source_url: string;
+  source_title: string;
+  summary: string;
+  confidence_delta: number;
+  status: 'confirmed' | 'rejected' | 'superseded';
+  confirmed_by: string;
+  confirmed_at: string;
+  chat_history: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }>;
+  notes: string;
+  created_at: string;
+}
+
+export interface DistrictEvidenceOverrideSummary {
+  state_key: string;
+  district_key: string;
+  confirmed_count: number;
+  confidence_delta_total: number;
+  latest_confirmed_at: string;
+}
+
+export interface DistrictContextResponse {
+  district: DistrictPriority;
+  healthProfile: DistrictHealthProfile | null;
+  serviceSummary: DistrictServiceSummary | null;
+  facilities: DistrictFacilityService[];
+  evidenceOverrides: DistrictEvidenceOverride[];
+  sourceNote: string;
+}
+
 export interface Intervention {
   id: string;
   title: string;
@@ -188,6 +308,9 @@ export interface CopilotResponse {
     districts: DistrictPriority[];
     facilitySummaryByDistrict: Array<Record<string, unknown>>;
     facilitySamples: Array<Record<string, unknown>>;
+    publicFacilityDetails: Array<Record<string, unknown>>;
+    healthProfile?: Record<string, unknown> | null;
+    serviceSummary?: Record<string, unknown> | null;
     quality: Record<string, unknown>;
     sourcePeriod: string;
     retrievalScope: {
@@ -199,11 +322,20 @@ export interface CopilotResponse {
       facilitySummaryRowsReturned: number;
       facilityExampleRowsReturned: number;
       facilityExampleLimit: number;
+      publicFacilityDetailRowsReturned: number;
     };
   };
   trust: {
     model: string;
     modelExecution: string;
+    agentMode?: string;
+    agentTools?: string[];
+    agentTrace?: Array<{
+      step?: number;
+      tool?: string;
+      tool_input?: string;
+      reason?: string;
+    }>;
     dataExecution: string;
     retrieval: string;
   };

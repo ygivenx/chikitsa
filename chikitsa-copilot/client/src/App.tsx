@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { createBrowserRouter, NavLink, Outlet, RouterProvider } from 'react-router';
+import { createBrowserRouter, NavLink, Outlet, RouterProvider, useLocation } from 'react-router';
 import { Button, Sheet, SheetContent, SheetHeader, SheetTitle } from '@databricks/appkit-ui/react';
-import { Bot, ClipboardList, HeartPulse, LayoutDashboard, MapPinned, Menu, Search } from 'lucide-react';
+import { Bot, ClipboardList, HeartPulse, MapPinned, Menu, Search } from 'lucide-react';
 import { CopilotPage } from './pages/CopilotPage';
 import { ExplorePage } from './pages/ExplorePage';
 import { IndiaMapPage } from './pages/IndiaMapPage';
@@ -9,8 +9,8 @@ import { OverviewPage } from './pages/OverviewPage';
 import { PlansPage } from './pages/PlansPage';
 
 const navigation = [
-  { to: '/', label: 'Brief', icon: LayoutDashboard, end: true },
-  { to: '/map', label: 'Map', icon: MapPinned },
+  { to: '/', label: 'India', icon: MapPinned, end: true },
+  { to: '/map', label: 'State map', icon: MapPinned },
   { to: '/explore', label: 'Evidence', icon: Search },
   { to: '/plans', label: 'Actions', icon: ClipboardList },
   { to: '/copilot', label: 'Copilot', icon: Bot },
@@ -57,6 +57,18 @@ function Brand() {
 
 function Layout() {
   const [open, setOpen] = useState(false);
+  const location = useLocation();
+  const isImmersiveLanding = location.pathname === '/';
+
+  if (isImmersiveLanding) {
+    return (
+      <div className="min-h-screen bg-background">
+        <main className="min-h-screen p-3 md:p-4">
+          <Outlet />
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
