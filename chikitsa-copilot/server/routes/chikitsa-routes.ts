@@ -95,21 +95,24 @@ const DISTRICT_RANKING_SQL = `
     SELECT
       p.state_key,
       p.district_key,
-      COUNT(DISTINCT f.facility_id)::INT AS facility_count,
-      ROUND(AVG(f.completeness_score)::NUMERIC, 2) AS avg_completeness_score,
-      SUM(
+      COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END)::INT AS facility_count,
+      COUNT(DISTINCT f.facility_id)::INT AS pin_matched_facility_count,
+      COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END)::INT AS unambiguous_pin_facility_count,
+      ROUND(AVG(CASE WHEN p.is_unambiguous THEN f.completeness_score END)::NUMERIC, 2) AS avg_completeness_score,
+      COUNT(DISTINCT
         CASE
-          WHEN f.coordinate_quality <> 'plausible_india'
-            OR f.capacity_outlier_flag
-            OR f.pincode_quality <> 'valid_format'
-          THEN 1
-          ELSE 0
+          WHEN p.is_unambiguous
+            AND (
+              f.coordinate_quality <> 'plausible_india'
+              OR f.capacity_outlier_flag
+              OR f.pincode_quality <> 'valid_format'
+            )
+          THEN f.facility_id
         END
       )::INT AS flagged_facility_count
     FROM public.facilities_curated f
     JOIN public.pincode_geography p
       ON f.pincode = p.pincode::TEXT
-      AND p.is_unambiguous = true
     GROUP BY p.state_key, p.district_key
   ),
   scored AS (
@@ -119,6 +122,8 @@ const DISTRICT_RANKING_SQL = `
       d.district_name,
       d.district_key,
       COALESCE(f.facility_count, 0) AS facility_count,
+      COALESCE(f.pin_matched_facility_count, 0) AS pin_matched_facility_count,
+      COALESCE(f.unambiguous_pin_facility_count, 0) AS unambiguous_pin_facility_count,
       COALESCE(f.flagged_facility_count, 0) AS flagged_facility_count,
       d.child_anaemia_pct,
       d.child_underweight_pct,
@@ -137,6 +142,12 @@ const DISTRICT_RANKING_SQL = `
       ROUND(GREATEST(0, LEAST(100,
         (COALESCE(f.avg_completeness_score, 0) / 7.0 * 100)
         - (COALESCE(f.flagged_facility_count, 0)::NUMERIC / GREATEST(COALESCE(f.facility_count, 0), 1) * 30)
+        - (
+          GREATEST(
+            COALESCE(f.pin_matched_facility_count, 0) - COALESCE(f.unambiguous_pin_facility_count, 0),
+            0
+          )::NUMERIC / GREATEST(COALESCE(f.pin_matched_facility_count, 0), 1) * 20
+        )
         - CASE WHEN d.contains_caution_estimate THEN 8 ELSE 0 END
         - CASE WHEN d.contains_suppressed_value THEN 15 ELSE 0 END
       ))::NUMERIC, 1)::DOUBLE PRECISION AS evidence_trust_score
@@ -153,6 +164,9 @@ const DISTRICT_RANKING_SQL = `
     ROUND((health_need_score * facility_scarcity_score / 100)::NUMERIC, 1)::DOUBLE PRECISION AS desert_score,
     ROUND((health_need_score * facility_scarcity_score / 100 * (0.65 + evidence_trust_score / 100 * 0.35))::NUMERIC, 1)
       ::DOUBLE PRECISION AS trust_adjusted_score,
+    ROUND(GREATEST(0, LEAST(100, facility_scarcity_score))::NUMERIC, 1)::DOUBLE PRECISION AS desert_area_pct,
+    ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (0.65 + evidence_trust_score / 100 * 0.35)))::NUMERIC, 1)
+      ::DOUBLE PRECISION AS desert_area_pct_trust_adjusted,
     CASE
       WHEN evidence_trust_score < 45 THEN 'verify'
       WHEN health_need_score >= 60 AND facility_scarcity_score >= 70 THEN 'build'
@@ -238,7 +252,7 @@ function parseLimit(value: unknown, fallback: number, maximum: number) {
 function parseStateKey(value: unknown) {
   if (typeof value !== 'string') return null;
   const stateKey = value.trim().toLowerCase();
-  return /^[a-z0-9][a-z0-9 _-]{0,120}$/.test(stateKey) ? stateKey : null;
+  return /^[a-z0-9][a-z0-9 _&-]{0,120}$/.test(stateKey) ? stateKey : null;
 }
 
 function toNumber(value: unknown, fallback = 0) {
@@ -545,7 +559,8 @@ export async function setupChikitsaRoutes(appkit: ChikitsaAppKit) {
             SELECT
               district_key AS h3_index,
               facility_scarcity_score < 50 AS is_covered,
-              trust_adjusted_score < desert_score AS is_covered_trust_adjusted,
+              (facility_scarcity_score * (0.65 + evidence_trust_score / 100 * 0.35)) < 50
+                AS is_covered_trust_adjusted,
               NULL::DOUBLE PRECISION AS population,
               NULL::DOUBLE PRECISION AS nearest_facility_distance_km,
               district_key

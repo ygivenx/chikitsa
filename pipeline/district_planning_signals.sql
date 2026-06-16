@@ -8,33 +8,44 @@ WITH facility_by_district AS (
     p.state_key,
     p.district_name,
     p.district_key,
-    CAST(COUNT(DISTINCT f.facility_id) AS INT) AS facility_count,
-    CAST(SUM(CASE WHEN LOWER(COALESCE(f.operator_type, '')) LIKE '%public%' THEN 1 ELSE 0 END) AS INT)
+    CAST(COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END) AS INT) AS facility_count,
+    CAST(COUNT(DISTINCT f.facility_id) AS INT) AS pin_matched_facility_count,
+    CAST(COUNT(DISTINCT CASE
+      WHEN p.is_unambiguous AND LOWER(COALESCE(f.operator_type, '')) LIKE '%public%' THEN f.facility_id
+    END) AS INT)
       AS public_facility_count,
-    CAST(SUM(CASE WHEN LOWER(COALESCE(f.operator_type, '')) LIKE '%private%' THEN 1 ELSE 0 END) AS INT)
+    CAST(COUNT(DISTINCT CASE
+      WHEN p.is_unambiguous AND LOWER(COALESCE(f.operator_type, '')) LIKE '%private%' THEN f.facility_id
+    END) AS INT)
       AS private_facility_count,
-    CAST(SUM(
+    CAST(COUNT(DISTINCT
       CASE
-        WHEN LOWER(COALESCE(f.operator_type, '')) NOT LIKE '%public%'
+        WHEN p.is_unambiguous
+          AND LOWER(COALESCE(f.operator_type, '')) NOT LIKE '%public%'
           AND LOWER(COALESCE(f.operator_type, '')) NOT LIKE '%private%'
-        THEN 1 ELSE 0
+        THEN f.facility_id
       END
     ) AS INT) AS unknown_operator_count,
-    CAST(SUM(CASE WHEN f.coordinate_quality = 'plausible_india' THEN 1 ELSE 0 END) AS INT) AS geocoded_facility_count,
-    CAST(SUM(CASE WHEN p.is_unambiguous THEN 1 ELSE 0 END) AS INT) AS unambiguous_pin_facility_count,
-    CAST(SUM(
+    CAST(COUNT(DISTINCT CASE
+      WHEN p.is_unambiguous AND f.coordinate_quality = 'plausible_india' THEN f.facility_id
+    END) AS INT) AS geocoded_facility_count,
+    CAST(COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END) AS INT)
+      AS unambiguous_pin_facility_count,
+    CAST(COUNT(DISTINCT
       CASE
-        WHEN f.coordinate_quality <> 'plausible_india'
-          OR f.capacity_outlier_flag
-          OR f.pincode_quality <> 'valid_format'
-          OR f.state_key_quality NOT IN ('clean', 'recovered_from_address')
-        THEN 1 ELSE 0
+        WHEN p.is_unambiguous
+          AND (
+            f.coordinate_quality <> 'plausible_india'
+            OR f.capacity_outlier_flag
+            OR f.pincode_quality <> 'valid_format'
+            OR f.state_key_quality NOT IN ('clean', 'recovered_from_address')
+          )
+        THEN f.facility_id
       END
     ) AS INT) AS flagged_facility_count
   FROM public.facilities_curated f
   JOIN public.pincode_geography p
     ON f.pincode = CAST(p.pincode AS STRING)
-    AND p.is_unambiguous = true
   WHERE COALESCE(f.facility_row_quality, 'valid') = 'valid'
   GROUP BY p.state_name, p.state_key, p.district_name, p.district_key
 ),
@@ -52,6 +63,7 @@ base AS (
     COALESCE(f.geocoded_facility_count, 0) AS geocoded_facility_count,
     COALESCE(f.flagged_facility_count, 0) AS flagged_facility_count,
     COALESCE(f.unambiguous_pin_facility_count, 0) AS unambiguous_pin_facility_count,
+    COALESCE(f.pin_matched_facility_count, 0) AS pin_matched_facility_count,
     d.child_anaemia_pct,
     d.child_underweight_pct,
     d.four_anc_visits_pct,
@@ -80,8 +92,8 @@ components AS (
       ELSE ROUND((geocoded_facility_count / facility_count * 100), 1)
     END AS t_geocoding,
     CASE
-      WHEN facility_count = 0 THEN NULL
-      ELSE ROUND((unambiguous_pin_facility_count / facility_count * 100), 1)
+      WHEN pin_matched_facility_count = 0 THEN NULL
+      ELSE ROUND((unambiguous_pin_facility_count / pin_matched_facility_count * 100), 1)
     END AS t_pin_unambiguous,
     CASE
       WHEN facility_count = 0 THEN NULL
@@ -132,9 +144,9 @@ SELECT
   evidence_trust_score,
   ROUND((desert_score * (0.65 + evidence_trust_score / 100 * 0.35)), 1)
     AS trust_adjusted_score,
-  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (100 - evidence_trust_score) / 100)), 1)
+  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score)), 1)
     AS desert_area_pct,
-  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (100 - evidence_trust_score * 0.75) / 100)), 1)
+  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (0.65 + evidence_trust_score / 100 * 0.35))), 1)
     AS desert_area_pct_trust_adjusted,
   CAST(NULL AS DOUBLE) AS desert_population,
   CAST(NULL AS DOUBLE) AS desert_population_pct,

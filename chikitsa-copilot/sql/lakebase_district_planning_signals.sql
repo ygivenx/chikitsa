@@ -5,32 +5,42 @@ WITH facility_by_district AS (
     p.state_key,
     p.district_name,
     p.district_key,
-    COUNT(DISTINCT f.facility_id)::INT AS facility_count,
-    SUM(CASE WHEN LOWER(COALESCE(f.operator_type, '')) LIKE '%public%' THEN 1 ELSE 0 END)::INT
+    COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END)::INT AS facility_count,
+    COUNT(DISTINCT f.facility_id)::INT AS pin_matched_facility_count,
+    COUNT(DISTINCT CASE
+      WHEN p.is_unambiguous AND LOWER(COALESCE(f.operator_type, '')) LIKE '%public%' THEN f.facility_id
+    END)::INT
       AS public_facility_count,
-    SUM(CASE WHEN LOWER(COALESCE(f.operator_type, '')) LIKE '%private%' THEN 1 ELSE 0 END)::INT
+    COUNT(DISTINCT CASE
+      WHEN p.is_unambiguous AND LOWER(COALESCE(f.operator_type, '')) LIKE '%private%' THEN f.facility_id
+    END)::INT
       AS private_facility_count,
-    SUM(
+    COUNT(DISTINCT
       CASE
-        WHEN LOWER(COALESCE(f.operator_type, '')) NOT LIKE '%public%'
+        WHEN p.is_unambiguous
+          AND LOWER(COALESCE(f.operator_type, '')) NOT LIKE '%public%'
           AND LOWER(COALESCE(f.operator_type, '')) NOT LIKE '%private%'
-        THEN 1 ELSE 0
+        THEN f.facility_id
       END
     )::INT AS unknown_operator_count,
-    SUM(CASE WHEN f.coordinate_quality = 'plausible_india' THEN 1 ELSE 0 END)::INT AS geocoded_facility_count,
-    SUM(CASE WHEN p.is_unambiguous THEN 1 ELSE 0 END)::INT AS unambiguous_pin_facility_count,
-    SUM(
+    COUNT(DISTINCT CASE
+      WHEN p.is_unambiguous AND f.coordinate_quality = 'plausible_india' THEN f.facility_id
+    END)::INT AS geocoded_facility_count,
+    COUNT(DISTINCT CASE WHEN p.is_unambiguous THEN f.facility_id END)::INT AS unambiguous_pin_facility_count,
+    COUNT(DISTINCT
       CASE
-        WHEN f.coordinate_quality <> 'plausible_india'
-          OR f.capacity_outlier_flag
-          OR f.pincode_quality <> 'valid_format'
-        THEN 1 ELSE 0
+        WHEN p.is_unambiguous
+          AND (
+            f.coordinate_quality <> 'plausible_india'
+            OR f.capacity_outlier_flag
+            OR f.pincode_quality <> 'valid_format'
+          )
+        THEN f.facility_id
       END
     )::INT AS flagged_facility_count
   FROM public.facilities_curated f
   JOIN public.pincode_geography p
     ON f.pincode = p.pincode::TEXT
-    AND p.is_unambiguous = true
   GROUP BY p.state_name, p.state_key, p.district_name, p.district_key
 ),
 base AS (
@@ -47,6 +57,7 @@ base AS (
     COALESCE(f.geocoded_facility_count, 0) AS geocoded_facility_count,
     COALESCE(f.flagged_facility_count, 0) AS flagged_facility_count,
     COALESCE(f.unambiguous_pin_facility_count, 0) AS unambiguous_pin_facility_count,
+    COALESCE(f.pin_matched_facility_count, 0) AS pin_matched_facility_count,
     d.child_anaemia_pct,
     d.child_underweight_pct,
     d.four_anc_visits_pct,
@@ -78,8 +89,8 @@ components AS (
       ELSE ROUND((geocoded_facility_count::NUMERIC / facility_count * 100), 1)::DOUBLE PRECISION
     END AS t_geocoding,
     CASE
-      WHEN facility_count = 0 THEN NULL
-      ELSE ROUND((unambiguous_pin_facility_count::NUMERIC / facility_count * 100), 1)::DOUBLE PRECISION
+      WHEN pin_matched_facility_count = 0 THEN NULL
+      ELSE ROUND((unambiguous_pin_facility_count::NUMERIC / pin_matched_facility_count * 100), 1)::DOUBLE PRECISION
     END AS t_pin_unambiguous,
     CASE
       WHEN facility_count = 0 THEN NULL
@@ -128,9 +139,9 @@ SELECT
   evidence_trust_score,
   ROUND((desert_score * (0.65 + evidence_trust_score / 100 * 0.35))::NUMERIC, 1)::DOUBLE PRECISION
     AS trust_adjusted_score,
-  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (100 - evidence_trust_score) / 100))::NUMERIC, 1)
+  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score))::NUMERIC, 1)
     ::DOUBLE PRECISION AS desert_area_pct,
-  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (100 - evidence_trust_score * 0.75) / 100))::NUMERIC, 1)
+  ROUND(GREATEST(0, LEAST(100, facility_scarcity_score * (0.65 + evidence_trust_score / 100 * 0.35)))::NUMERIC, 1)
     ::DOUBLE PRECISION AS desert_area_pct_trust_adjusted,
   NULL::DOUBLE PRECISION AS desert_population,
   NULL::DOUBLE PRECISION AS desert_population_pct,
